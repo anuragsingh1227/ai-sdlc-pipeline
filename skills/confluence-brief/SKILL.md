@@ -13,7 +13,7 @@ role: spec-writer
 
 ## Steps
 
-1. Read `agents/spec-writer/SYSTEM.md` and `runs/<feature-id>/00-source/page.md`.
+1. If `00-source/page.md` is missing, stop. A human fetches it with `pipeline confluence fetch` (`--mock` offline, or live credentials from `.env`). Then read `agents/spec-writer/SYSTEM.md` and the export.
 2. Read `templates/confluence-brief.md` and `docs/CONFLUENCE.md`.
 3. List goals, users, constraints, and exclusions that the page actually states.
 4. List open questions for anything a spec would otherwise have to invent.

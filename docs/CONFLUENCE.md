@@ -4,8 +4,25 @@ Stage 1 freezes a Confluence page into files so later roles do not browse the wi
 
 ## Point at a page
 
-1. Copy the page URL.
-2. Export or paste the page body into `runs/<feature-id>/00-source/page.md`. Include the title and a link at the top. A live fetch is not required for v1.
+1. Copy the page URL or numeric id.
+2. Fetch it into the run, or paste an export by hand.
+
+Offline (recorded fixture, no token):
+
+```bash
+npx tsx src/cli.ts confluence fetch --page 1042 --out runs/<feature-id>/00-source --mock
+```
+
+Live Confluence Cloud (`GET /wiki/rest/api/content/{id}?expand=body.storage`):
+
+```bash
+npx tsx src/cli.ts confluence fetch --page 1042 --out runs/<feature-id>/00-source
+```
+
+Auth is HTTP Basic, `CONFLUENCE_EMAIL`:`CONFLUENCE_API_TOKEN`. The client turns storage HTML into markdown and writes `00-source/page.md`. A page URL such as `https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Title` is accepted. The token is never placed in the URL.
+
+Without credentials and without `--mock` / `PIPELINE_MOCK_ATLASSIAN=1`, the command fails and names the missing variables.
+
 3. Record the URL and page id in `runs/<feature-id>/manifest.yaml` and in `01-brief/brief.meta.yaml` after the brief exists.
 
 ```yaml
@@ -16,14 +33,14 @@ source:
   pageId: "1042"
 ```
 
-Environment placeholders, unused by the stub, are in `.env.example`:
+Live calls read these variables from the environment or an untracked `.env` (see `.env.example`):
 
 - `CONFLUENCE_BASE_URL`
 - `CONFLUENCE_EMAIL`
 - `CONFLUENCE_API_TOKEN`
 - `CONFLUENCE_PAGE_ID`
 
-`integrations/confluence.ts` throws until a team chooses an HTTP client and a token store. Do not half-implement it in a feature branch.
+`integrations/confluence.ts` implements `getPage`. Tests call it with `--mock` or an injected `fetch`. Live calls run only when you pass real credentials.
 
 ## What the writer produces
 

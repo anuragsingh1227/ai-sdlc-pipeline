@@ -10,6 +10,28 @@ Run this from the control-plane repo:
 npx tsx src/cli.ts status <feature-id>
 ```
 
+Or let the runner prepare the next stage and stop if the next action is a human gate:
+
+```bash
+npx tsx src/cli.ts run --run runs/<feature-id> --dry-run
+npx tsx src/cli.ts run --run runs/<feature-id> --worker none
+npx tsx src/cli.ts run --run runs/<feature-id> --worker grok
+```
+
+`--worker none` is the default. It copies a template into a missing output and appends a `pipeline-draft` marker. `validate` fails that file until the worker replaces it. `--dry-run` prints the same plan and does not write or launch anything.
+
+When a worker is set and the binary is on `PATH`, the runner writes `runs/<feature-id>/.pipeline/task.md` (system prompt, skill, input paths, output paths) and invokes exactly:
+
+| Worker | Command |
+| --- | --- |
+| Grok Build | `grok -p --prompt-file <task.md>` |
+| Claude Code | `claude -p <task text>` |
+| Codex | `codex exec <task text>` |
+
+The working directory is the control-plane repo. For the implement stage, the task tells the worker to edit the product repo named in the run. If the binary is missing, the runner exits with an error and does not pretend the stage ran. The runner does not pick a model and does not import an LLM SDK.
+
+Grok Build teammates can ignore `--worker` and follow `pipeline status` by hand. The CLI is still the validator: run `check`, `validate`, and `status` around that work.
+
 The output names a role, a skill, input paths, and output paths. Then:
 
 1. Start a **new** session. Do not resume the session that wrote the artifact under review.

@@ -1,6 +1,6 @@
 # Jira acceptance criteria
 
-Stage 4 runs only after the spec critic's verdict is `approve` and the manifest gate `spec-approved` is `passed`. v1 writes ticket drafts into the run directory. It does not create issues.
+Stage 4 runs only after the spec critic's verdict is `approve` and the manifest gate `spec-approved` is `passed`. The agent writes ticket drafts. A human pushes them.
 
 ## Acceptance criteria
 
@@ -42,7 +42,17 @@ File: `runs/<feature-id>/04-jira/tickets.yaml`
 
 Placeholder env vars: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`.
 
-`integrations/jira.ts` is a stub. Creating issues remotely is a TODO that should create the epic first, store returned keys back into `tickets.yaml`, and link stories to that epic. Do not call Jira from the orchestrator CLI.
+Push from the control plane:
+
+```bash
+npx tsx src/cli.ts jira push --run runs/<feature-id> --dry-run
+npx tsx src/cli.ts jira push --run runs/<feature-id> --mock
+npx tsx src/cli.ts jira push --run runs/<feature-id> --apply
+```
+
+Dry-run is the default. `--mock` reads `examples/fixtures/jira-create-response.json`, writes `04-jira/push-result.json`, and stores keys back into `tickets.yaml`. `--apply` calls Jira Cloud `POST /rest/api/3/issue` (or `PUT` when a story already has a `key`). The epic is created first. Story descriptions are Atlassian document format built from the Given/When/Then text. Auth is Basic `JIRA_EMAIL`:`JIRA_API_TOKEN`. The token is not written into the URL or the JSON body.
+
+Without credentials, `--apply` fails and names `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_PROJECT_KEY`.
 
 ## Trace
 

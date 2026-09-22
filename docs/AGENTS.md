@@ -28,14 +28,14 @@ You compare the feature spec to the Confluence page and the brief. You list gaps
 
 ## 3. AC / Jira agent
 
-You translate an approved spec into Given/When/Then acceptance criteria and Jira ticket drafts. Every story traces to a behavior in the spec. You do not add stories for ideas that are out of scope. You do not write code. You do not create remote Jira issues unless a human has asked you to run a future adapter; v1 writes files only.
+You translate an approved spec into Given/When/Then acceptance criteria and Jira ticket drafts. Every story traces to a behavior in the spec. You do not add stories for ideas that are out of scope. You do not write code. You write `tickets.yaml` only. A human runs `pipeline jira push` when those drafts should become remote issues.
 
 | | Path |
 | --- | --- |
 | Read | `02-spec/feature-spec.md`, `03-spec-critic/verdict.md`, and the manifest gate `spec-approved: passed` |
 | Write | `04-jira/acceptance-criteria.md`, `04-jira/tickets.yaml` |
 | Skill | `skills/write-jira-ac/SKILL.md` |
-| Stop | The critic did not approve, the human gate is not `passed`, or the spec is ambiguous for a testable Then |
+| Stop | The critic did not approve, the human gate is not `passed`, or the spec is ambiguous for a testable Then. Do not call Jira; a human runs `pipeline jira push` |
 
 ## 4. Implementer
 

@@ -6,26 +6,24 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
-import { createJiraIssue } from "../integrations/jira.js";
-import { fetchConfluencePage } from "../integrations/confluence.js";
 import { main } from "./cli.js";
 import { loadPipeline, validatePipelineDocument } from "./pipeline.js";
 import { assessRun } from "./run.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function capture(argv: string[]): { code: number; stdout: string; stderr: string } {
+async function capture(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const out: string[] = [];
   const err: string[] = [];
-  const code = main(argv, (line) => out.push(line), (line) => err.push(line));
+  const code = await main(argv, (line) => out.push(line), (line) => err.push(line));
   return { code, stdout: out.join("\n"), stderr: err.join("\n") };
 }
 
-test("validate accepts the phase graph", () => {
+test("validate accepts the phase graph", async () => {
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["validate"]);
+    const result = await capture(["validate"]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /pipeline\.yaml: ok/);
   } finally {
@@ -33,11 +31,11 @@ test("validate accepts the phase graph", () => {
   }
 });
 
-test("validate accepts the order-explain sample", () => {
+test("validate accepts the order-explain sample", async () => {
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["validate", "--run", "examples/sample-run"]);
+    const result = await capture(["validate", "--run", "examples/sample-run"]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /examples\/sample-run: ok/);
   } finally {
@@ -45,11 +43,11 @@ test("validate accepts the order-explain sample", () => {
   }
 });
 
-test("status waits on the human merge gate", () => {
+test("status waits on the human merge gate", async () => {
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["status", "--run", "examples/sample-run"]);
+    const result = await capture(["status", "--run", "examples/sample-run"]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /Feature: order-explain/);
     assert.match(result.stdout, /Next: human gate "merge"/);
@@ -74,7 +72,7 @@ test("an empty feature is waiting on the confluence brief", () => {
   assert.equal(status.errors.length, 0);
 });
 
-test("matching critic and author sessions fail validation", () => {
+test("matching critic and author sessions fail validation", async () => {
   const dir = copySample();
   const manifestPath = path.join(dir, "manifest.yaml");
   const manifest = fs.readFileSync(manifestPath, "utf8").replace("critic-session-01", "writer-session-01");
@@ -82,7 +80,7 @@ test("matching critic and author sessions fail validation", () => {
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["validate", "--run", dir]);
+    const result = await capture(["validate", "--run", dir]);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /spec-critic session matches spec-writer/);
   } finally {
@@ -124,11 +122,11 @@ test("the graph rejects an orchestrator that calls a model", () => {
   assert.ok(result.errors.some((error) => error.includes("orchestrator.llm must be false")));
 });
 
-test("check accepts the repo scaffold", () => {
+test("check accepts the repo scaffold", async () => {
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["check"]);
+    const result = await capture(["check"]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /pipeline\.yaml: scaffold ok/);
   } finally {
@@ -136,13 +134,13 @@ test("check accepts the repo scaffold", () => {
   }
 });
 
-test("a missing middle artifact names the path", () => {
+test("a missing middle artifact names the path", async () => {
   const dir = copySample();
   fs.rmSync(path.join(dir, "02-spec", "feature-spec.md"));
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
-    const result = capture(["validate", "--run", dir]);
+    const result = await capture(["validate", "--run", dir]);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /02-spec\/feature-spec\.md: missing output "feature-spec" for stage spec-draft/);
   } finally {
@@ -190,11 +188,6 @@ test("skipping a stage in the graph is rejected", () => {
   specDraft.onSuccess = "release";
   const result = validatePipelineDocument(document, repoRoot);
   assert.ok(result.errors.some((error) => error.includes("spec-draft onSuccess must be the next stage")));
-});
-
-test("integration stubs reject instead of no-oping", async () => {
-  await assert.rejects(fetchConfluencePage({ baseUrl: "https://example.atlassian.net", pageId: "1" }), /not implemented/);
-  await assert.rejects(createJiraIssue({ project: "OPS", summary: "Example" }), /not implemented/);
 });
 
 test("cli entry validates the sample", () => {

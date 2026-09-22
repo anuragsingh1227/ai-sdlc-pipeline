@@ -14,6 +14,9 @@ import type {
 
 const GATE_STATES = new Set(["passed", "pending", "skipped"]);
 
+/** Appended when `pipeline run` copies a template. Validate refuses the stage until a worker replaces the draft. */
+export const DRAFT_LINE = "<!-- pipeline-draft: replace this scaffold before the stage can pass validate -->";
+
 export function resolveArtifact(runDir: string, artifactPath: string): string {
   const relative = artifactPath.replace(/^\{run\}\/?/, "");
   return path.join(runDir, relative);
@@ -313,6 +316,9 @@ function checkArtifactContents(
   if (text.trim().length === 0) {
     errors.push(`${rel}: file is empty`);
     return;
+  }
+  if (text.includes("pipeline-draft")) {
+    errors.push(`${rel}: still a draft scaffold; replace it before this stage can pass`);
   }
   const lines = new Set(text.split(/\r?\n/).map((line) => line.trim()));
   for (const heading of artifact.requiredHeadings) {

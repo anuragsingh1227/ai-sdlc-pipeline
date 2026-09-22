@@ -59,9 +59,9 @@ Those projects are the references for the ideas below. This repo does not ship t
 | Handoff | Spec files and context docs in the working tree | Files between roles, never shared chat memory | Phase state on the ticket, isolated workers | Files under `runs/<feature-id>/`, one fresh session per role |
 | Who reviews the spec | A verify step in the same workflow | A different role, often a different model family | A later phase, with a human gate | A different role that only hunts gaps against the Confluence brief |
 | Routing | Skill sequence inside one CLI | Slash commands on Claude Code, Codex, and Cursor | YAML phase graph, zero tokens in the router, Claude Code or Codex workers | YAML phase graph, zero tokens in the router, any of four workers |
-| What v1 runs | The host's agent | The host's agent, including QA on a local stack | Polling, gates, PR creation | `pipeline check`, `pipeline validate`, and `pipeline status` |
+| What it runs | The host's agent | The host's agent, including QA on a local stack | Polling, gates, PR creation | `check`, `validate`, `status`, `run`, Confluence fetch, and Jira push |
 
-Use this repo when the team wants the Confluence → spec → separate critic → Jira → implement → separate code critic → human merge loop written down, and wants to point whichever coding CLI they already have at the next file. It does not poll Jira, call Confluence, or merge pull requests.
+Use this repo when the team wants the Confluence → spec → separate critic → Jira → implement → separate code critic → human merge loop written down, and wants to point whichever coding CLI they already have at the next file. It can fetch one Confluence page and push ticket drafts. It does not poll Jira, and it does not merge pull requests.
 
 ## Quickstart
 
@@ -88,6 +88,60 @@ npx tsx src/cli.ts status --run examples/sample-run
 `validate` checks that scaffold and, with `--run`, each present artifact: non-empty files, required headings, brief meta fields, Given/When/Then, ticket shape, verdicts, gates, and separate critic sessions. The sample feature must pass.
 
 `status` prints the next stage, the role that must run it, and the artifact paths. The sample feature, Order explain, is waiting on the human merge gate.
+
+## Path to 9/10
+
+This repository orchestrates and validates. It does not contain the product source, and it does not deploy to ECS. Coding still happens in the product repo. A human can do that in Grok Build, or the CLI can shell out to `grok`, `claude`, or `codex` for a single stage. Routing stays in `pipeline.yaml`. No model SDK is imported.
+
+Offline path (no Atlassian credentials):
+
+```bash
+npm install
+npm run check
+npm run validate
+npm run status
+npm test
+npm run typecheck
+
+# Recorded Confluence page -> markdown export
+npx tsx src/cli.ts confluence fetch --page 1042 --out /tmp/order-explain/00-source --mock
+
+# Sample is already at the merge gate. Dry-run stops there and writes nothing.
+npx tsx src/cli.ts run --run examples/sample-run --dry-run
+
+# Planned Jira issues. Dry-run does not write. --mock writes fixture keys into a copy.
+npx tsx src/cli.ts jira push --run examples/sample-run --dry-run
+```
+
+Live Atlassian, after you copy `.env.example` to `.env` and fill the tokens locally. Required names:
+
+- `CONFLUENCE_BASE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_API_TOKEN`, `CONFLUENCE_PAGE_ID`
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`
+
+`PIPELINE_MOCK_ATLASSIAN=1` is the same as `--mock`. Leave it unset for live calls.
+
+```bash
+npx tsx src/cli.ts confluence fetch --page "$CONFLUENCE_PAGE_ID" --out runs/my-feature/00-source
+npx tsx src/cli.ts run --run runs/my-feature --worker none
+npx tsx src/cli.ts status my-feature
+npx tsx src/cli.ts jira push --run runs/my-feature --apply
+```
+
+`jira push` dry-runs unless you pass `--apply` or `--mock`. `pipeline run` stops at `brief-questions`, `spec-approved`, and `merge`. Set those gates yourself in `manifest.yaml`. Workers, when you opt in:
+
+| Worker | Argv |
+| --- | --- |
+| grok | `grok -p --prompt-file <run>/.pipeline/task.md` |
+| claude | `claude -p <task text>` |
+| codex | `codex exec <task text>` |
+
+The task file contains that stage's `SYSTEM.md`, skill, and artifact paths. Default `--worker none` only copies a template and marks it `pipeline-draft`, which `validate` rejects until a worker replaces it.
+
+What you still do outside this repo:
+
+- Build and test Java and React in the product repo (see `examples/order-explain-ecs/README.md` for the shape, not a real checkout).
+- Review the spec at the `spec-approved` gate.
+- Merge the pull request. Deploy-to-dev stays on the product pipeline.
 
 Start a real feature:
 
@@ -118,14 +172,14 @@ Host notes: [`docs/HOSTS.md`](docs/HOSTS.md).
 | Path | Purpose |
 | --- | --- |
 | [`pipeline.yaml`](pipeline.yaml) | Stages, inputs, outputs, gates, roles, retry limits |
-| [`src/cli.ts`](src/cli.ts) | `pipeline check`, `pipeline validate`, and `pipeline status` |
+| [`src/cli.ts`](src/cli.ts) | `check`, `validate`, `status`, `run`, `confluence fetch`, `jira push` |
 | [`docs/`](docs/) | Architecture, role contracts, Confluence, Jira, hosts |
 | [`agents/`](agents/) | System prompt, inputs, outputs, and done-when for each role |
 | [`skills/`](skills/) | One skill per stage, including the release step |
 | [`templates/`](templates/) | Brief, spec, AC, MR, and Java/React example patterns |
 | [`examples/sample-run/`](examples/sample-run/) | Order explain artifact chain |
 | [`orchestrator/README.md`](orchestrator/README.md) | How sequencing and human gates work |
-| [`integrations/`](integrations/) | Confluence and Jira stubs with TODOs |
+| [`integrations/`](integrations/) | Confluence and Jira REST clients, with fixture mode for CI |
 | [`.env.example`](.env.example) | Placeholder names for `CONFLUENCE_*`, `JIRA_*`, and `GIT_HOST` |
 
 ## Rules that are not optional

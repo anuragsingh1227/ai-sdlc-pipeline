@@ -18,7 +18,7 @@ The next stage is `jira-ac`. The spec critic approved, and a human set `gates.sp
 3. Read `docs/JIRA.md`, `templates/acceptance-criteria.md`, and the spec's behavior and out-of-scope sections.
 4. Write one Given/When/Then story per behavior, including the failure behaviors the spec names.
 5. Write `tickets.yaml` with one story per AC story and a single epic. Leave story points unset.
-6. Do not call Jira. Leave remote creation as a TODO for `integrations/jira.ts`.
+6. Do not call Jira from this session. A human runs `pipeline jira push --run <dir>` (`--mock` offline, `--apply` when credentials exist).
 
 ## Required inputs
 

@@ -1,41 +1,60 @@
 #!/usr/bin/env tsx
 import fs from "node:fs";
 import path from "node:path";
+import { getPage, writeConfluenceExport } from "../integrations/confluence.js";
+import { createIssuesFromTicketsYaml } from "../integrations/jira.js";
+import { loadLocalEnv, readAtlassianEnv } from "./env.js";
 import { loadPipeline } from "./pipeline.js";
 import { assessRun, formatStatus } from "./run.js";
+import { runNextStage, type WorkerName } from "./runner.js";
 import { checkScaffold } from "./scaffold.js";
 
 const HELP = `pipeline — sequence the AI SDLC control plane
 
-The CLI reads pipeline.yaml and run files. It does not call a model.
+The CLI reads pipeline.yaml and run files. It does not call a model to choose the next stage.
 
 Usage:
   pipeline check [--file pipeline.yaml]
   pipeline validate [--file pipeline.yaml] [--run <dir>]
   pipeline status [<feature-id>] [--root runs] [--run <dir>] [--file pipeline.yaml]
+  pipeline run --run <dir> [--to <stage>] [--dry-run] [--worker grok|claude|codex|none]
+  pipeline confluence fetch --page <id|url> --out <dir> [--mock]
+  pipeline jira push --run <dir> [--dry-run] [--mock] [--apply]
 
-check verifies the repo scaffold: required docs, agent folders, skill frontmatter,
-template headings, role-separation prompts, and empty secret placeholders.
-It does not assess a feature run.
+check verifies the repo scaffold. validate also checks a run when --run is set.
+status prints the next stage or human gate.
 
-validate checks the same scaffold and phase graph. With --run it also checks that
-feature's artifacts: required files, markdown headings, verdicts, human gates,
-and session separation. A schema failure stops the run at that stage.
+run prepares the next stage's missing templates and stops at a human gate.
+--dry-run prints the actions and does not write or launch a worker.
+--worker defaults to none (no model CLI). grok, claude, and codex are optional shells.
 
-status prints the next stage or human gate and the artifact paths a worker needs.
-Feature ids are directories under --root (default: the artifactRoot in pipeline.yaml).
+confluence fetch writes 00-source/page.md. jira push reads 04-jira/tickets.yaml.
+Both stay offline with --mock or PIPELINE_MOCK_ATLASSIAN=1. jira push dry-runs unless --apply or --mock.
+Live calls need the variables in .env.example. Do not commit tokens.
 `;
 
 interface Args {
   command: string | undefined;
+  subcommand?: string;
   file: string;
   root?: string;
   run?: string;
   featureId?: string;
   help: boolean;
+  page?: string;
+  out?: string;
+  to?: string;
+  mock: boolean;
+  dryRun: boolean;
+  apply: boolean;
+  worker: WorkerName;
 }
 
-export function main(argv: string[], stdout: (line: string) => void = console.log, stderr: (line: string) => void = console.error): number {
+export async function main(
+  argv: string[],
+  stdout: (line: string) => void = console.log,
+  stderr: (line: string) => void = console.error,
+): Promise<number> {
   let args: Args;
   try {
     args = parseArgs(argv);
@@ -50,14 +69,26 @@ export function main(argv: string[], stdout: (line: string) => void = console.lo
     return 0;
   }
 
+  const pipelineFile = path.resolve(args.file);
+  const rootDir = path.dirname(pipelineFile);
+  loadLocalEnv(rootDir);
+
+  if (args.command === "confluence") {
+    return confluenceCommand(args, rootDir, stdout, stderr);
+  }
+  if (args.command === "jira") {
+    return jiraCommand(args, rootDir, stdout, stderr);
+  }
+  if (args.command === "run") {
+    return runCommand(args, rootDir, stdout, stderr);
+  }
+
   if (args.command !== "validate" && args.command !== "status" && args.command !== "check") {
     stderr(`Unknown command: ${args.command}`);
     stderr(HELP);
     return 2;
   }
 
-  const pipelineFile = path.resolve(args.file);
-  const rootDir = path.dirname(pipelineFile);
   if (args.command === "check" && args.run) {
     stderr("check does not take --run; use validate --run for a feature directory");
     return 2;
@@ -135,6 +166,115 @@ export function main(argv: string[], stdout: (line: string) => void = console.lo
   return code;
 }
 
+async function confluenceCommand(
+  args: Args,
+  rootDir: string,
+  stdout: (line: string) => void,
+  stderr: (line: string) => void,
+): Promise<number> {
+  if (args.subcommand !== "fetch") {
+    stderr("Usage: pipeline confluence fetch --page <id|url> --out <dir> [--mock]");
+    return 2;
+  }
+  if (!args.page || !args.out) {
+    stderr("confluence fetch needs --page and --out");
+    return 2;
+  }
+  const env = readAtlassianEnv();
+  try {
+    const page = await getPage(args.page, {
+      mock: args.mock || env.mock,
+      env,
+      fixturePath: path.join(rootDir, "examples/fixtures/confluence-page.json"),
+    });
+    const written = await writeConfluenceExport(page, args.out);
+    stdout(`Wrote ${display(written)} (${args.mock || env.mock ? "mock" : "live"}, page ${page.id})`);
+    return 0;
+  } catch (error) {
+    stderr(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function jiraCommand(
+  args: Args,
+  rootDir: string,
+  stdout: (line: string) => void,
+  stderr: (line: string) => void,
+): Promise<number> {
+  if (args.subcommand !== "push") {
+    stderr("Usage: pipeline jira push --run <dir> [--dry-run] [--mock] [--apply]");
+    return 2;
+  }
+  if (!args.run) {
+    stderr("jira push needs --run <dir>");
+    return 2;
+  }
+  const env = readAtlassianEnv();
+  const mock = args.mock || env.mock;
+  const dryRun = args.dryRun || (!mock && !args.apply);
+  const ticketsPath = path.join(args.run, "04-jira", "tickets.yaml");
+  if (!fs.existsSync(ticketsPath)) {
+    stderr(`${display(ticketsPath)}: missing tickets.yaml`);
+    return 1;
+  }
+  try {
+    const result = await createIssuesFromTicketsYaml(ticketsPath, {
+      mock,
+      dryRun,
+      apply: args.apply,
+      env,
+      fixturePath: path.join(rootDir, "examples/fixtures/jira-create-response.json"),
+    });
+    stdout(`Jira push (${result.mode}) project ${result.project}`);
+    if (result.epicKey) {
+      stdout(`Epic: ${result.epicKey}`);
+    }
+    for (const issue of result.issues) {
+      stdout(`- ${issue.action} ${issue.key ?? "(no key yet)"} ${issue.issueType}: ${issue.summary}`);
+    }
+    if (result.resultPath) {
+      stdout(`Wrote ${display(result.resultPath)}`);
+    }
+    if (result.mode === "dry-run") {
+      stdout("Dry-run only. Pass --mock to use fixtures, or --apply with Jira credentials to create issues.");
+    }
+    return 0;
+  } catch (error) {
+    stderr(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+function runCommand(
+  args: Args,
+  rootDir: string,
+  stdout: (line: string) => void,
+  stderr: (line: string) => void,
+): number {
+  if (!args.run) {
+    stderr("pipeline run needs --run <dir>");
+    return 2;
+  }
+  const loaded = loadPipeline(path.join(rootDir, "pipeline.yaml"));
+  if (!loaded.pipeline) {
+    for (const error of loaded.errors) {
+      stderr(`- ${error}`);
+    }
+    return 1;
+  }
+  const result = runNextStage(loaded.pipeline, args.run, {
+    dryRun: args.dryRun,
+    worker: args.worker,
+    to: args.to,
+  });
+  stdout(result.report);
+  if (result.code !== 0) {
+    stderr("pipeline run stopped");
+  }
+  return result.code;
+}
+
 function printOne(
   pipeline: NonNullable<ReturnType<typeof loadPipeline>["pipeline"]>,
   runDir: string,
@@ -150,28 +290,57 @@ function printOne(
   return 0;
 }
 
-function parseArgs(argv: string[]): Args {
-  const [command, ...rest] = argv;
-  const args: Args = { command, file: "pipeline.yaml", help: false };
+export function parseArgs(argv: string[]): Args {
+  let [command, ...rest] = argv;
+  let subcommand: string | undefined;
+  if (command === "confluence" || command === "jira") {
+    subcommand = rest[0];
+    if (!subcommand || subcommand.startsWith("--")) {
+      throw new Error(`${command} needs a subcommand (${command === "confluence" ? "fetch" : "push"})`);
+    }
+    rest = rest.slice(1);
+  }
+  const args: Args = {
+    command,
+    subcommand,
+    file: "pipeline.yaml",
+    help: false,
+    mock: false,
+    dryRun: false,
+    apply: false,
+    worker: "none",
+  };
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (token === "--help" || token === "-h") {
       args.help = true;
       continue;
     }
-    if (token === "--file" || token === "--root" || token === "--run") {
+    if (token === "--mock") {
+      args.mock = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      args.dryRun = true;
+      continue;
+    }
+    if (token === "--apply") {
+      args.apply = true;
+      continue;
+    }
+    if (token === "--file" || token === "--root" || token === "--run" || token === "--page" || token === "--out" || token === "--to" || token === "--worker") {
       const value = rest[index + 1];
       if (!value || value.startsWith("--")) {
         throw new Error(`${token} needs a value`);
       }
       index += 1;
-      if (token === "--file") {
-        args.file = value;
-      } else if (token === "--root") {
-        args.root = value;
-      } else {
-        args.run = value;
-      }
+      if (token === "--file") args.file = value;
+      else if (token === "--root") args.root = value;
+      else if (token === "--run") args.run = value;
+      else if (token === "--page") args.page = value;
+      else if (token === "--out") args.out = value;
+      else if (token === "--to") args.to = value;
+      else args.worker = parseWorker(value);
       continue;
     }
     if (token.startsWith("-")) {
@@ -185,7 +354,17 @@ function parseArgs(argv: string[]): Args {
   if (args.run && args.featureId) {
     throw new Error("Pass either a feature id or --run, not both");
   }
+  if (args.apply && args.dryRun) {
+    throw new Error("Pass only one of --apply or --dry-run");
+  }
   return args;
+}
+
+function parseWorker(value: string): WorkerName {
+  if (value === "none" || value === "grok" || value === "claude" || value === "codex") {
+    return value;
+  }
+  throw new Error(`--worker must be grok, claude, codex, or none`);
 }
 
 function display(filePath: string): string {
@@ -195,5 +374,12 @@ function display(filePath: string): string {
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
 if (isDirectRun) {
-  process.exit(main(process.argv.slice(2)));
+  main(process.argv.slice(2))
+    .then((code) => {
+      process.exit(code);
+    })
+    .catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
 }

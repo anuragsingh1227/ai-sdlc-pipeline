@@ -38,7 +38,7 @@ const SECRET_PATTERN = /sk-|xox[baprs]-|AKIA[0-9A-Z]{16}|ghp_|github_pat_|ATATT/
 
 /**
  * Checks the control-plane repo itself: required files, env placeholders,
- * integration stubs, and role-separation prompts. Does not assess a feature run.
+ * integration clients, and role-separation prompts. Does not assess a feature run.
  * Pipeline graph, skill frontmatter, and template headings are included via loadPipeline.
  */
 export function checkScaffold(rootDir: string): string[] {
@@ -103,17 +103,30 @@ function checkEnvExample(root: string, errors: string[]): void {
 }
 
 function checkStubs(root: string, errors: string[]): void {
-  for (const relative of ["integrations/confluence.ts", "integrations/jira.ts"]) {
-    const full = path.join(root, relative);
+  const expectations: Array<{ file: string; phrase: string }> = [
+    { file: "integrations/confluence.ts", phrase: "export async function getPage" },
+    { file: "integrations/jira.ts", phrase: "export async function createIssuesFromTicketsYaml" },
+  ];
+  for (const expectation of expectations) {
+    const full = path.join(root, expectation.file);
     if (!fs.existsSync(full)) {
       continue;
     }
     const text = fs.readFileSync(full, "utf8");
-    if (!text.includes("not implemented") || !text.includes("throw new Error")) {
-      errors.push(`${relative}: stub must throw an Error that says "not implemented"`);
+    if (!text.includes(expectation.phrase)) {
+      errors.push(`${expectation.file}: missing ${expectation.phrase}`);
     }
-    if (/\bfetch\s*\(/.test(text) || text.includes("http.request") || text.includes("https.request")) {
-      errors.push(`${relative}: stub must not call the network`);
+    if (!text.includes("credentials are not set")) {
+      errors.push(`${expectation.file}: missing a credentials-are-not-set error`);
+    }
+    if (/sk-|xox[baprs]-|ATATT|ghp_/.test(text)) {
+      errors.push(`${expectation.file}: looks like a committed secret`);
+    }
+  }
+  for (const relative of ["examples/fixtures/confluence-page.json", "examples/fixtures/jira-create-response.json"]) {
+    const full = path.join(root, relative);
+    if (!fs.existsSync(full)) {
+      errors.push(`${relative}: missing`);
     }
   }
 }

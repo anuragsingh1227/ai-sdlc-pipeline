@@ -17,7 +17,11 @@ npx tsx src/cli.ts validate
 npx tsx src/cli.ts validate --run examples/sample-run
 npx tsx src/cli.ts status --run examples/sample-run
 npx tsx src/cli.ts status <feature-id>          # reads runs/<feature-id>
+npx tsx src/cli.ts run --run <feature-dir> --dry-run
+npx tsx src/cli.ts run --run <feature-dir> --worker none
 ```
+
+`run` prepares at most one stage. It copies a missing template, marks it as a draft, and stops when the next action is a human gate. `--worker grok`, `claude`, or `codex` shells out only if that binary is on `PATH`. The default worker is `none`.
 
 `check` validates the repo scaffold and the phase graph, and does not read a feature run. `validate --run` also schema-checks that run's files. A missing heading or a verdict that is not `approve` or `send-back` stops the walk at that stage.
 
@@ -34,7 +38,7 @@ Walk stages by `order`:
   - `spec-approved` always blocks until the manifest says `passed`.
   - `merge` always blocks until a human sets it to `passed`. There is no stage after it.
 
-The CLI does not launch workers. A human or an external script reads the status and starts the host named in [`docs/HOSTS.md`](../docs/HOSTS.md).
+With `--worker none` (the default) the CLI only prepares files. With `--worker grok`, `claude`, or `codex` it shells out to that binary for the current stage, using the argv in [`docs/HOSTS.md`](../docs/HOSTS.md). A missing binary is an error. Grok Build teammates can still follow `pipeline status` by hand and skip `--worker`.
 
 ## Human gates
 
@@ -59,4 +63,4 @@ When `03-spec-critic/verdict.md` exists, `sessions.spec-writer` and `sessions.sp
 
 ## Out of scope for the orchestrator
 
-Live Confluence or Jira calls, git push, MR creation, CI watches, and deploy. Those are worker skills or human actions. Stubs live in [`integrations/`](../integrations/).
+Git push, MR creation, CI watches, and deploy. Confluence fetch and Jira push are separate commands in [`integrations/`](../integrations/). They do not choose the next stage.

@@ -11,8 +11,11 @@ Implementer session: impl-session-01
 - `order-api/src/main/java/com/example/order/explanation/ExplanationAudit.java` — agent id, order id, explanation id, timestamp. No address fields.
 - `order-console/src/orders/explain/OrderExplainPanel.tsx` — button, status text, citation list. No navigation.
 - `order-console/src/orders/explain/useOrderExplanation.ts` — calls the existing API client.
+- `order-console/src/orders/detail/OrderDetailPage.tsx` — mounts the panel under the event timeline on the existing order route.
+- `order-api/src/main/resources/application.yml` — no new property. `llm.gateway.url` already maps from `LLM_GATEWAY_URL`.
+- `deploy/ecs/order-api-taskdef.json` — unchanged. Service `order-api`, same target group, container health check `GET /actuator/health`. No new secret and no new service.
 
-No task-definition change. `LLM_GATEWAY_URL` is already on the order-api ECS task.
+The product repo is not this control plane. Paths above are the files the implementer would change in the commerce console.
 
 ## Tests
 

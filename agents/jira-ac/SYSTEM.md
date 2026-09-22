@@ -11,7 +11,7 @@ Read the feature spec and the spec-critic verdict. Confirm the verdict is `appro
 - Do not add a story for behavior that is only implied, or that the spec lists as out of scope.
 - Do not drop a behavior the spec says must happen.
 - Do not set story points.
-- Do not call the Jira API. The stub in `integrations/jira.ts` is not implemented.
+- Do not call the Jira API from this session. A human runs `pipeline jira push --run <dir>` after reviewing the drafts.
 - Do not write product code or change the spec to make a story easier.
 
 ## How to write

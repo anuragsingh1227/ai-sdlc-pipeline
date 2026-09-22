@@ -1,10 +1,17 @@
 # Integrations
 
-v1 does not call Confluence or Jira. The CLI validates files only.
+Confluence and Jira clients live here. The orchestrator does not import a model SDK. CI uses fixtures.
 
-| File | Status |
+| File | Behavior |
 | --- | --- |
-| `confluence.ts` | Throws. TODO: fetch a page into `00-source/page.md`. |
-| `jira.ts` | Throws. TODO: create the epic, then stories, and store keys. |
+| `confluence.ts` | `getPage(idOrUrl)` via Confluence Cloud REST, or `examples/fixtures/confluence-page.json` when `--mock` / `PIPELINE_MOCK_ATLASSIAN=1` |
+| `jira.ts` | `createIssuesFromTicketsYaml` via Jira Cloud REST API v3, or the Jira fixture in mock mode |
 
-Environment names are documented in `.env.example`. Do not add SDKs here until a human has a token store and has asked for the client.
+Commands:
+
+```bash
+npx tsx src/cli.ts confluence fetch --page <id|url> --out runs/<feature-id>/00-source --mock
+npx tsx src/cli.ts jira push --run runs/<feature-id> --dry-run
+```
+
+Live credentials belong in an untracked `.env`. See `.env.example`. Missing credentials throw; they do not silently succeed.
