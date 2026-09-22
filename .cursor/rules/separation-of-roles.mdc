@@ -1,0 +1,15 @@
+---
+description: Critics never implement, and implementers never self-approve.
+alwaysApply: true
+---
+
+# Role separation
+
+This repository is an AI SDLC control plane. Stages hand off through files under `runs/<feature-id>/`.
+
+- The spec critic does not edit the spec, the brief, or product code. The spec critic only writes `03-spec-critic/verdict.md`.
+- The code critic does not edit product code. The code critic writes `06-code-critic/review.md`.
+- The implementer does not write a critic verdict and does not open the merge request.
+- The release step does not merge. `gates.merge` stays `pending` until a human merges.
+- Do not continue a writer or implementer chat and "act as" the critic. Start the critic from the files in a new session.
+- If `pipeline status` names a stage, do that stage only.

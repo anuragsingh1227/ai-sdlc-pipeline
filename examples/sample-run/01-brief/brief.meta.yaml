@@ -1,0 +1,6 @@
+source:
+  url: https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain
+  pageId: "1042"
+  export: 00-source/page.md
+openQuestions: []
+capturedAt: "2026-09-22"

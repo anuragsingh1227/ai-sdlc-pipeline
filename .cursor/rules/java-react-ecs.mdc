@@ -1,0 +1,29 @@
+---
+description: Frozen Java, React, and ECS patterns for product repos this pipeline targets.
+alwaysApply: true
+---
+
+# Frozen product patterns
+
+Apply these when implementing in a Java + React product on AWS ECS. The product repo's existing pattern wins if it already has one. These rules block new stacks and self-approval.
+
+## Java
+
+- Add endpoints inside the existing Spring Boot service. Controller → application service → existing ports.
+- Request and response types are records with Bean Validation. Do not return persistence entities.
+- Use the product's current error type for 403, 404, and timeouts.
+- Tests are JUnit 5 and AssertJ. Mock only the ports the service already mocks.
+- See `templates/java-spring-endpoint.md`.
+
+## React
+
+- Colocate the feature next to the screen it extends. Use the app's existing API client.
+- Cover idle, loading, success, empty, and error. Loading disables the trigger. Status is text, not color alone.
+- Do not add a UI framework. See `templates/react-feature.md`.
+
+## ECS
+
+- Do not add a service, a cluster, or a sidecar for one feature.
+- Configuration is an environment variable already injected by the product's secret mechanism.
+- Do not put tokens in source, Dockerfiles, or task-definition literals.
+- The release note may mention deploy-to-dev. It does not perform production deploys, and it does not merge.

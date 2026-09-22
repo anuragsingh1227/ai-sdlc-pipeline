@@ -1,0 +1,23 @@
+featureId: order-explain
+title: Order explain
+productRepo: ../commerce-console
+source:
+  kind: confluence
+  url: https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain
+  pageId: "1042"
+  export: 00-source/page.md
+sessions:
+  spec-writer: writer-session-01
+  spec-critic: critic-session-01
+  jira-ac: jira-session-01
+  implementer: impl-session-01
+  code-critic-release: review-session-01
+gates:
+  brief-questions: skipped
+  spec-approved: passed
+  merge: pending
+attempts:
+  spec-draft: 2
+  spec-critic: 2
+  implement: 1
+  code-critic: 1
