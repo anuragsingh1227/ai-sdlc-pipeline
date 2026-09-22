@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
+import { createJiraIssue } from "../integrations/jira.js";
+import { fetchConfluencePage } from "../integrations/confluence.js";
 import { main } from "./cli.js";
 import { loadPipeline, validatePipelineDocument } from "./pipeline.js";
 import { assessRun } from "./run.js";
@@ -119,6 +122,79 @@ test("the graph rejects an orchestrator that calls a model", () => {
   };
   const result = validatePipelineDocument(broken, repoRoot);
   assert.ok(result.errors.some((error) => error.includes("orchestrator.llm must be false")));
+});
+
+test("check accepts the repo scaffold", () => {
+  const previous = process.cwd();
+  process.chdir(repoRoot);
+  try {
+    const result = capture(["check"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /pipeline\.yaml: scaffold ok/);
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("a missing middle artifact names the path", () => {
+  const dir = copySample();
+  fs.rmSync(path.join(dir, "02-spec", "feature-spec.md"));
+  const previous = process.cwd();
+  process.chdir(repoRoot);
+  try {
+    const result = capture(["validate", "--run", dir]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /02-spec\/feature-spec\.md: missing output "feature-spec" for stage spec-draft/);
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("a brief missing a required section fails at that stage", () => {
+  const dir = copySample();
+  const briefPath = path.join(dir, "01-brief", "brief.md");
+  fs.writeFileSync(briefPath, fs.readFileSync(briefPath, "utf8").replace("## Goals", "## Goalz"));
+  const loaded = loadPipeline(path.join(repoRoot, "pipeline.yaml"));
+  assert.ok(loaded.pipeline);
+  const status = assessRun(loaded.pipeline, dir);
+  assert.ok(status.errors.some((error) => error === '01-brief/brief.md: missing heading ## Goals'));
+  assert.equal(status.next.kind, "stage");
+  if (status.next.kind === "stage") {
+    assert.equal(status.next.stage.id, "confluence-brief");
+  }
+});
+
+test("an empty artifact is an error, not a silent skip", () => {
+  const dir = copySample();
+  fs.writeFileSync(path.join(dir, "01-brief", "brief.md"), "\n");
+  const loaded = loadPipeline(path.join(repoRoot, "pipeline.yaml"));
+  assert.ok(loaded.pipeline);
+  const status = assessRun(loaded.pipeline, dir);
+  assert.ok(status.errors.some((error) => error.includes("01-brief/brief.md: file is empty")));
+});
+
+test("a missing run directory is blocked rather than done", () => {
+  const loaded = loadPipeline(path.join(repoRoot, "pipeline.yaml"));
+  assert.ok(loaded.pipeline);
+  const status = assessRun(loaded.pipeline, path.join(repoRoot, "runs", "does-not-exist"));
+  assert.equal(status.next.kind, "blocked");
+  assert.ok(status.errors.some((error) => error.includes("Run directory not found")));
+});
+
+test("skipping a stage in the graph is rejected", () => {
+  const document = parse(fs.readFileSync(path.join(repoRoot, "pipeline.yaml"), "utf8")) as {
+    stages: Array<{ id: string; onSuccess?: string }>;
+  };
+  const specDraft = document.stages.find((stage) => stage.id === "spec-draft");
+  assert.ok(specDraft);
+  specDraft.onSuccess = "release";
+  const result = validatePipelineDocument(document, repoRoot);
+  assert.ok(result.errors.some((error) => error.includes("spec-draft onSuccess must be the next stage")));
+});
+
+test("integration stubs reject instead of no-oping", async () => {
+  await assert.rejects(fetchConfluencePage({ baseUrl: "https://example.atlassian.net", pageId: "1" }), /not implemented/);
+  await assert.rejects(createJiraIssue({ project: "OPS", summary: "Example" }), /not implemented/);
 });
 
 test("cli entry validates the sample", () => {

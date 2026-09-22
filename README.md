@@ -59,7 +59,7 @@ Those projects are the references for the ideas below. This repo does not ship t
 | Handoff | Spec files and context docs in the working tree | Files between roles, never shared chat memory | Phase state on the ticket, isolated workers | Files under `runs/<feature-id>/`, one fresh session per role |
 | Who reviews the spec | A verify step in the same workflow | A different role, often a different model family | A later phase, with a human gate | A different role that only hunts gaps against the Confluence brief |
 | Routing | Skill sequence inside one CLI | Slash commands on Claude Code, Codex, and Cursor | YAML phase graph, zero tokens in the router, Claude Code or Codex workers | YAML phase graph, zero tokens in the router, any of four workers |
-| What v1 runs | The host's agent | The host's agent, including QA on a local stack | Polling, gates, PR creation | `pipeline validate` and `pipeline status` only |
+| What v1 runs | The host's agent | The host's agent, including QA on a local stack | Polling, gates, PR creation | `pipeline check`, `pipeline validate`, and `pipeline status` |
 
 Use this repo when the team wants the Confluence → spec → separate critic → Jira → implement → separate code critic → human merge loop written down, and wants to point whichever coding CLI they already have at the next file. It does not poll Jira, call Confluence, or merge pull requests.
 
@@ -69,12 +69,23 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
-npx tsx src/cli.ts validate
+npm run check
+npm run validate
+npm run status
+npm test
+```
+
+The same commands through the CLI:
+
+```bash
+npx tsx src/cli.ts check
 npx tsx src/cli.ts validate --run examples/sample-run
 npx tsx src/cli.ts status --run examples/sample-run
 ```
 
-`validate` checks the phase graph: stage order, role separation, skill paths, retry limits, and human gates. With `--run`, it also checks that run's files, verdicts, and session ids.
+`check` verifies the scaffold: docs, agent folders, skill frontmatter, template headings, role-separation rules, and empty API tokens in `.env.example`. It does not read a feature run.
+
+`validate` checks that scaffold and, with `--run`, each present artifact: non-empty files, required headings, brief meta fields, Given/When/Then, ticket shape, verdicts, gates, and separate critic sessions. The sample feature must pass.
 
 `status` prints the next stage, the role that must run it, and the artifact paths. The sample feature, Order explain, is waiting on the human merge gate.
 
@@ -107,7 +118,7 @@ Host notes: [`docs/HOSTS.md`](docs/HOSTS.md).
 | Path | Purpose |
 | --- | --- |
 | [`pipeline.yaml`](pipeline.yaml) | Stages, inputs, outputs, gates, roles, retry limits |
-| [`src/cli.ts`](src/cli.ts) | `pipeline validate` and `pipeline status` |
+| [`src/cli.ts`](src/cli.ts) | `pipeline check`, `pipeline validate`, and `pipeline status` |
 | [`docs/`](docs/) | Architecture, role contracts, Confluence, Jira, hosts |
 | [`agents/`](agents/) | System prompt, inputs, outputs, and done-when for each role |
 | [`skills/`](skills/) | One skill per stage, including the release step |

@@ -21,7 +21,7 @@ You compare the feature spec to the Confluence page and the brief. You list gaps
 
 | | Path |
 | --- | --- |
-| Read | `00-source/page.md`, `01-brief/brief.md`, `02-spec/feature-spec.md` |
+| Read | `00-source/page.md`, `01-brief/brief.md`, `01-brief/brief.meta.yaml`, `02-spec/feature-spec.md` |
 | Write | `03-spec-critic/verdict.md` |
 | Skill | `skills/critique-spec/SKILL.md` |
 | Stop | Inputs are missing, or the session id matches the spec writer |
@@ -61,4 +61,4 @@ You review a change you did not write. You check the diff against the acceptance
 
 ## Orchestrator
 
-Not an LLM role. See [`orchestrator/README.md`](../orchestrator/README.md). It only runs `pipeline validate` and `pipeline status`.
+Not an LLM role. See [`orchestrator/README.md`](../orchestrator/README.md). It runs `pipeline check`, `pipeline validate`, and `pipeline status`.

@@ -24,12 +24,13 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
   const errors: string[] = [];
   const featureId = path.basename(absoluteRun);
   if (!fs.existsSync(absoluteRun) || !fs.statSync(absoluteRun).isDirectory()) {
+    const message = `Run directory not found: ${absoluteRun}`;
     return {
       featureId,
       runDir: absoluteRun,
       completed: [],
-      next: { kind: "done" },
-      errors: [`Run directory not found: ${absoluteRun}`],
+      next: { kind: "blocked", message },
+      errors: [message],
     };
   }
 
@@ -45,29 +46,55 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
     if (stage.requiresGate) {
       const gate = pipeline.humanGates[stage.requiresGate];
       if (gate && gateBlocks(gate, manifest, briefMeta)) {
+        flagArtifactsBeforeGate(absoluteRun, stages, stage.order, gate.id, errors);
         next = { kind: "gate", gate };
         break;
       }
     }
 
-    const missingOutput = stage.outputs.some((artifact) => !filePresent(absoluteRun, artifact));
-    if (missingOutput) {
-      for (const later of stages) {
-        if (later.order > stage.order && stageHasAnyOutput(absoluteRun, later)) {
-          errors.push(`${later.id} has artifacts but ${stage.id} is incomplete`);
+    const outputStates = stage.outputs.map((artifact) => ({
+      artifact,
+      state: inspectFile(absoluteRun, artifact),
+    }));
+    const incomplete = outputStates.some((item) => item.state !== "ok");
+    if (incomplete) {
+      const started = outputStates.some((item) => item.state !== "missing");
+      const later = stages.some((item) => item.order > stage.order && stageHasAnyFile(absoluteRun, item));
+      for (const item of outputStates) {
+        const rel = runRelative(item.artifact);
+        if (item.state === "empty") {
+          errors.push(`${rel}: file is empty`);
+        } else if (item.state === "missing" && (started || later)) {
+          const why = later
+            ? "later stage artifacts exist"
+            : `other outputs for ${stage.id} are already present`;
+          errors.push(`${rel}: missing output "${item.artifact.name}" for stage ${stage.id} (${why})`);
+        }
+      }
+      for (const item of outputStates) {
+        if (item.state === "ok") {
+          checkArtifactContents(absoluteRun, item.artifact, errors, ticketsChecked);
         }
       }
       next = stageAction(absoluteRun, stage);
       break;
     }
 
+    const schemaErrors = errors.length;
     for (const artifact of stage.outputs) {
-      checkArtifactContents(pipeline, absoluteRun, artifact, errors, ticketsChecked);
+      checkArtifactContents(absoluteRun, artifact, errors, ticketsChecked);
+    }
+    if (stage.id === "confluence-brief") {
+      checkOpenQuestions(absoluteRun, briefMeta, errors);
     }
     for (const artifact of stage.inputs) {
-      if (artifact.required && !filePresent(absoluteRun, artifact)) {
-        errors.push(`${stage.id} is complete but input ${artifact.name} is missing`);
+      if (artifact.required && inspectFile(absoluteRun, artifact) !== "ok") {
+        errors.push(`${runRelative(artifact)}: missing input "${artifact.name}" required by completed stage ${stage.id}`);
       }
+    }
+    if (errors.length > schemaErrors) {
+      next = stageAction(absoluteRun, stage, "output failed schema check");
+      break;
     }
 
     checkAttempts(stage, manifest, errors);
@@ -76,7 +103,9 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
     if (stage.verdictValues) {
       const verdict = readVerdict(absoluteRun, stage);
       if (!stage.verdictValues.includes(verdict)) {
-        errors.push(`${stage.id} verdict must be one of ${stage.verdictValues.join(", ")}, found ${verdict || "nothing"}`);
+        const verdictFile = stage.outputs.find((item) => item.name === "verdict" || item.name === "review");
+        const where = verdictFile ? runRelative(verdictFile) : stage.id;
+        errors.push(`${where}: verdict must be one of ${stage.verdictValues.join(", ")}, found ${verdict || "nothing"}`);
         next = stageAction(absoluteRun, stage, "verdict is not readable");
         break;
       }
@@ -87,8 +116,12 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
           break;
         }
         for (const later of stages) {
-          if (later.order > stage.order && stageHasAnyOutput(absoluteRun, later)) {
-            errors.push(`${later.id} has artifacts after ${stage.id} sent the work back`);
+          if (later.order > stage.order && stageHasAnyFile(absoluteRun, later)) {
+            for (const artifact of later.outputs) {
+              if (fileExists(absoluteRun, artifact)) {
+                errors.push(`${runRelative(artifact)}: present after ${stage.id} sent the work back to ${target.id}`);
+              }
+            }
           }
         }
         next = stageAction(absoluteRun, target, `${stage.id} verdict is send-back`);
@@ -105,11 +138,7 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
       if (gate.required === "conditional" && manifest.gates[gate.id] === "skipped") {
         errors.push(`gate ${gate.id} cannot be skipped while open questions remain`);
       }
-      for (const later of stages) {
-        if (later.order > stage.order && stageHasAnyOutput(absoluteRun, later)) {
-          errors.push(`${later.id} has artifacts before gate ${gate.id} is passed`);
-        }
-      }
+      flagArtifactsBeforeGate(absoluteRun, stages, stage.order + 1, gate.id, errors);
       next = { kind: "gate", gate };
       break;
     }
@@ -160,6 +189,9 @@ export function formatStatus(status: RunStatus, cwd = process.cwd()): string {
 }
 
 function formatNext(next: NextAction, cwd: string): string {
+  if (next.kind === "blocked") {
+    return `Next: blocked\n  ${next.message}`;
+  }
   if (next.kind === "done") {
     return "Next: done";
   }
@@ -270,71 +302,74 @@ function checkGateVocabulary(pipeline: Pipeline, manifest: RunManifest, errors: 
 }
 
 function checkArtifactContents(
-  pipeline: Pipeline,
   runDir: string,
   artifact: Artifact,
   errors: string[],
   ticketsChecked: { done: boolean },
 ): void {
   const full = resolveArtifact(runDir, artifact.path);
+  const rel = runRelative(artifact);
   const text = fs.readFileSync(full, "utf8");
   if (text.trim().length === 0) {
-    errors.push(`${full} is empty`);
+    errors.push(`${rel}: file is empty`);
     return;
   }
   const lines = new Set(text.split(/\r?\n/).map((line) => line.trim()));
   for (const heading of artifact.requiredHeadings) {
     if (!lines.has(heading)) {
-      errors.push(`${path.relative(pipeline.rootDir, full) || full} is missing heading ${heading}`);
+      errors.push(`${rel}: missing heading ${heading}`);
     }
+  }
+  if (artifact.requiredFields.length > 0) {
+    checkRequiredFields(full, rel, artifact.requiredFields, errors);
   }
   if (artifact.name === "acceptance-criteria" || artifact.path.endsWith("acceptance-criteria.md")) {
     for (const word of ["Given", "When", "Then"]) {
-      if (!text.includes(word)) {
-        errors.push(`${artifact.path} must contain ${word}`);
+      if (!new RegExp(`\\b${word}\\b`).test(text)) {
+        errors.push(`${rel}: must contain ${word}`);
       }
     }
   }
   if (artifact.name === "tickets" && !ticketsChecked.done) {
     ticketsChecked.done = true;
-    checkTickets(full, errors);
+    checkTickets(full, rel, errors);
   }
 }
 
-function checkTickets(filePath: string, errors: string[]): void {
+function checkTickets(filePath: string, rel: string, errors: string[]): void {
   let document: unknown;
   try {
     document = parse(fs.readFileSync(filePath, "utf8"));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    errors.push(`tickets.yaml could not be parsed: ${message}`);
+    errors.push(`${rel}: could not be parsed: ${message}`);
     return;
   }
   if (!isRecord(document) || typeof document.project !== "string") {
-    errors.push("tickets.yaml needs a project");
+    errors.push(`${rel}: needs a project`);
     return;
   }
   if (!isRecord(document.epic) || document.epic.issueType !== "Epic" || typeof document.epic.summary !== "string") {
-    errors.push("tickets.yaml epic needs issueType Epic and a summary");
+    errors.push(`${rel}: epic needs issueType Epic and a summary`);
   }
   if (!Array.isArray(document.stories) || document.stories.length === 0) {
-    errors.push("tickets.yaml needs at least one story");
+    errors.push(`${rel}: needs at least one story`);
     return;
   }
   document.stories.forEach((story, index) => {
     if (!isRecord(story)) {
-      errors.push(`tickets.yaml story ${index + 1} must be a mapping`);
+      errors.push(`${rel}: story ${index + 1} must be a mapping`);
       return;
     }
     for (const field of ["issueType", "summary", "description", "acceptanceCriteria", "parent"]) {
       if (typeof story[field] !== "string" || story[field].length === 0) {
-        errors.push(`tickets.yaml story ${index + 1} needs ${field}`);
+        errors.push(`${rel}: story ${index + 1} needs ${field}`);
       }
     }
     const criteria = typeof story.acceptanceCriteria === "string" ? story.acceptanceCriteria : "";
     for (const word of ["Given", "When", "Then"]) {
       if (!criteria.includes(word)) {
-        errors.push(`tickets.yaml story ${index + 1} acceptanceCriteria must contain ${word}`);
+        errors.push(`${rel}: story ${index + 1} acceptanceCriteria must contain ${word}`);
       }
     }
   });
@@ -401,15 +436,7 @@ function readBriefMeta(pipeline: Pipeline, runDir: string, errors: string[]): Br
     errors.push(`brief.meta.yaml could not be parsed: ${message}`);
     return null;
   }
-  if (!isRecord(document)) {
-    errors.push("brief.meta.yaml must be a mapping");
-    return null;
-  }
-  if (!isRecord(document.source) || typeof document.source.url !== "string" || typeof document.source.pageId !== "string") {
-    errors.push("brief.meta.yaml source needs url and pageId");
-  }
-  if (!Array.isArray(document.openQuestions) || document.openQuestions.some((item) => typeof item !== "string")) {
-    errors.push("brief.meta.yaml openQuestions must be a list of strings");
+  if (!isRecord(document) || !Array.isArray(document.openQuestions) || document.openQuestions.some((item) => typeof item !== "string")) {
     return { openQuestions: [] };
   }
   return { openQuestions: document.openQuestions };
@@ -439,15 +466,117 @@ function readVerdict(runDir: string, stage: Stage): string {
 }
 
 function filePresent(runDir: string, artifact: Artifact): boolean {
-  const full = resolveArtifact(runDir, artifact.path);
-  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
-    return false;
-  }
-  return fs.readFileSync(full, "utf8").trim().length > 0;
+  return inspectFile(runDir, artifact) === "ok";
 }
 
-function stageHasAnyOutput(runDir: string, stage: Stage): boolean {
-  return stage.outputs.some((artifact) => filePresent(runDir, artifact));
+function fileExists(runDir: string, artifact: Artifact): boolean {
+  const full = resolveArtifact(runDir, artifact.path);
+  return fs.existsSync(full) && fs.statSync(full).isFile();
+}
+
+function inspectFile(runDir: string, artifact: Artifact): "missing" | "empty" | "ok" {
+  const full = resolveArtifact(runDir, artifact.path);
+  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
+    return "missing";
+  }
+  return fs.readFileSync(full, "utf8").trim().length === 0 ? "empty" : "ok";
+}
+
+function stageHasAnyFile(runDir: string, stage: Stage): boolean {
+  return stage.outputs.some((artifact) => fileExists(runDir, artifact));
+}
+
+function runRelative(artifact: Artifact): string {
+  return artifact.path.replace(/^\{run\}\/?/, "");
+}
+
+function flagArtifactsBeforeGate(
+  runDir: string,
+  stages: Stage[],
+  minimumOrder: number,
+  gateId: string,
+  errors: string[],
+): void {
+  for (const later of stages) {
+    if (later.order < minimumOrder) {
+      continue;
+    }
+    for (const artifact of later.outputs) {
+      if (fileExists(runDir, artifact)) {
+        errors.push(`${runRelative(artifact)}: present before gate ${gateId} is passed`);
+      }
+    }
+  }
+}
+
+function checkRequiredFields(filePath: string, rel: string, fields: string[], errors: string[]): void {
+  let document: unknown;
+  try {
+    document = parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    errors.push(`${rel}: could not be parsed: ${message}`);
+    return;
+  }
+  for (const field of fields) {
+    const value = valueAt(document, field);
+    if (field === "openQuestions") {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        errors.push(`${rel}: field openQuestions must be a list of strings`);
+      }
+      continue;
+    }
+    if (typeof value !== "string" || value.trim().length === 0) {
+      errors.push(`${rel}: missing field ${field}`);
+    }
+  }
+}
+
+function checkOpenQuestions(runDir: string, briefMeta: BriefMeta | null, errors: string[]): void {
+  const briefPath = path.join(runDir, "01-brief", "brief.md");
+  if (!fs.existsSync(briefPath) || !briefMeta) {
+    return;
+  }
+  const body = sectionBody(fs.readFileSync(briefPath, "utf8"), "## Open questions");
+  const bullets = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).trim())
+    .filter((line) => !/^none\b/i.test(line));
+  if (briefMeta.openQuestions.length === 0 && bullets.length > 0) {
+    errors.push("01-brief/brief.md: Open questions lists items but 01-brief/brief.meta.yaml openQuestions is empty");
+  }
+  if (briefMeta.openQuestions.length > 0 && bullets.length === 0) {
+    errors.push("01-brief/brief.meta.yaml: openQuestions is non-empty but 01-brief/brief.md has no question bullets under \"## Open questions\"");
+  }
+  for (const question of briefMeta.openQuestions) {
+    if (!body.includes(question)) {
+      errors.push(`01-brief/brief.meta.yaml: open question is missing from 01-brief/brief.md: ${question}`);
+    }
+  }
+}
+
+function sectionBody(text: string, heading: string): string {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === heading);
+  if (start === -1) {
+    return "";
+  }
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => line.startsWith("## "));
+  return (end === -1 ? rest : rest.slice(0, end)).join("\n");
+}
+
+function valueAt(document: unknown, dotted: string): unknown {
+  let current = document;
+  for (const part of dotted.split(".")) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[part];
+  }
+  return current;
 }
 
 function orderOf(pipeline: Pipeline, stageId: string): number {

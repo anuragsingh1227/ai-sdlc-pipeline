@@ -12,11 +12,14 @@ The orchestrator sequences the seven stages. It is a YAML file and a local CLI. 
 Commands, from the repo root:
 
 ```bash
+npx tsx src/cli.ts check
 npx tsx src/cli.ts validate
 npx tsx src/cli.ts validate --run examples/sample-run
 npx tsx src/cli.ts status --run examples/sample-run
 npx tsx src/cli.ts status <feature-id>          # reads runs/<feature-id>
 ```
+
+`check` validates the repo scaffold and the phase graph, and does not read a feature run. `validate --run` also schema-checks that run's files. A missing heading or a verdict that is not `approve` or `send-back` stops the walk at that stage.
 
 Exit code `0` means the graph (and the run, if given) is consistent. Exit code `1` means a validation error. Exit code `2` means bad arguments.
 

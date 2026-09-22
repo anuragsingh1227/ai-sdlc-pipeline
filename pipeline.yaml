@@ -84,6 +84,10 @@ stages:
           - "## Open questions"
       - name: brief-meta
         path: "{run}/01-brief/brief.meta.yaml"
+        requiredFields:
+          - source.url
+          - source.pageId
+          - openQuestions
     onSuccess: brief-questions
     onReject: brief-questions
 
@@ -131,6 +135,9 @@ stages:
         required: true
       - name: brief
         path: "{run}/01-brief/brief.md"
+        required: true
+      - name: brief-meta
+        path: "{run}/01-brief/brief.meta.yaml"
         required: true
       - name: feature-spec
         path: "{run}/02-spec/feature-spec.md"

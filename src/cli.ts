@@ -3,17 +3,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadPipeline } from "./pipeline.js";
 import { assessRun, formatStatus } from "./run.js";
+import { checkScaffold } from "./scaffold.js";
 
 const HELP = `pipeline — sequence the AI SDLC control plane
 
 The CLI reads pipeline.yaml and run files. It does not call a model.
 
 Usage:
+  pipeline check [--file pipeline.yaml]
   pipeline validate [--file pipeline.yaml] [--run <dir>]
   pipeline status [<feature-id>] [--root runs] [--run <dir>] [--file pipeline.yaml]
 
-validate checks the phase graph. With --run it also checks that feature's artifacts,
-verdicts, human gates, and session separation.
+check verifies the repo scaffold: required docs, agent folders, skill frontmatter,
+template headings, role-separation prompts, and empty secret placeholders.
+It does not assess a feature run.
+
+validate checks the same scaffold and phase graph. With --run it also checks that
+feature's artifacts: required files, markdown headings, verdicts, human gates,
+and session separation. A schema failure stops the run at that stage.
 
 status prints the next stage or human gate and the artifact paths a worker needs.
 Feature ids are directories under --root (default: the artifactRoot in pipeline.yaml).
@@ -43,10 +50,32 @@ export function main(argv: string[], stdout: (line: string) => void = console.lo
     return 0;
   }
 
-  if (args.command !== "validate" && args.command !== "status") {
+  if (args.command !== "validate" && args.command !== "status" && args.command !== "check") {
     stderr(`Unknown command: ${args.command}`);
     stderr(HELP);
     return 2;
+  }
+
+  const pipelineFile = path.resolve(args.file);
+  const rootDir = path.dirname(pipelineFile);
+  if (args.command === "check" && args.run) {
+    stderr("check does not take --run; use validate --run for a feature directory");
+    return 2;
+  }
+
+  if (args.command === "check" || args.command === "validate") {
+    const scaffoldErrors = checkScaffold(rootDir);
+    if (scaffoldErrors.length > 0) {
+      stderr(`${display(args.file)}: invalid`);
+      for (const error of scaffoldErrors) {
+        stderr(`- ${error}`);
+      }
+      return 1;
+    }
+    if (args.command === "check" || !args.run) {
+      stdout(args.command === "check" ? `${display(args.file)}: scaffold ok` : `${display(args.file)}: ok`);
+      return 0;
+    }
   }
 
   const loaded = loadPipeline(args.file);
@@ -58,7 +87,6 @@ export function main(argv: string[], stdout: (line: string) => void = console.lo
   }
 
   if (args.command === "validate") {
-    stdout(`${display(args.file)}: ok`);
     if (!args.run) {
       return 0;
     }
@@ -70,6 +98,7 @@ export function main(argv: string[], stdout: (line: string) => void = console.lo
       }
       return 1;
     }
+    stdout(`${display(args.file)}: ok`);
     stdout(`${display(args.run)}: ok`);
     return 0;
   }

@@ -59,6 +59,7 @@ export interface Artifact {
   source?: string;
   template?: string;
   requiredHeadings: string[];
+  requiredFields: string[];
   contract: boolean;
   note?: string;
 }
@@ -87,6 +88,7 @@ export type NextAction =
       kind: "gate";
       gate: HumanGate;
     }
+  | { kind: "blocked"; message: string }
   | { kind: "done" };
 
 export interface RunStatus {

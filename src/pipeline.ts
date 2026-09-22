@@ -14,6 +14,14 @@ const REQUIRED_STAGE_IDS = [
 ] as const;
 
 const ROLE_FILES = ["SYSTEM.md", "INPUT.md", "OUTPUT.md", "CHECKLIST.md"];
+const SKILL_SECTIONS = [
+  "## When to use",
+  "## Steps",
+  "## Required inputs",
+  "## Required outputs",
+  "## Stop and ask a human",
+  "## Done when",
+];
 
 export function loadPipeline(filePath: string): { pipeline: Pipeline | null; errors: string[] } {
   const absolute = path.resolve(filePath);
@@ -150,6 +158,9 @@ function parseGates(value: unknown, errors: string[]): Record<string, HumanGate>
       errors.push(`human gate ${id} needs after, resume, and prompt`);
       continue;
     }
+    if (required === null) {
+      continue;
+    }
     if (required === "conditional" && typeof raw.condition !== "string") {
       errors.push(`human gate ${id} is conditional and needs a condition`);
     }
@@ -240,6 +251,9 @@ function parseArtifacts(value: unknown, label: string, errors: string[]): Artifa
       requiredHeadings: Array.isArray(raw.requiredHeadings)
         ? raw.requiredHeadings.filter((item): item is string => typeof item === "string")
         : [],
+      requiredFields: Array.isArray(raw.requiredFields)
+        ? raw.requiredFields.filter((item): item is string => typeof item === "string")
+        : [],
       contract: raw.contract === true,
       note: typeof raw.note === "string" ? raw.note : undefined,
     });
@@ -301,8 +315,20 @@ function checkGraph(pipeline: Pipeline, errors: string[]): void {
       if (!artifact.path.includes("{run}/")) {
         errors.push(`stage ${stage.id} artifact ${artifact.name} path must start with {run}/`);
       }
-      if (artifact.template && !fs.existsSync(path.join(pipeline.rootDir, artifact.template))) {
-        errors.push(`stage ${stage.id} template not found: ${artifact.template}`);
+      if (artifact.template) {
+        const templatePath = path.join(pipeline.rootDir, artifact.template);
+        if (!fs.existsSync(templatePath)) {
+          errors.push(`stage ${stage.id} template not found: ${artifact.template}`);
+        } else {
+          const templateLines = new Set(
+            fs.readFileSync(templatePath, "utf8").split(/\r?\n/).map((line) => line.trim()),
+          );
+          for (const heading of artifact.requiredHeadings) {
+            if (!templateLines.has(heading)) {
+              errors.push(`${artifact.template}: missing heading ${heading} required by stage ${stage.id}`);
+            }
+          }
+        }
       }
     }
     if (stage.outputs.length === 0) {
@@ -330,10 +356,15 @@ function checkGraph(pipeline: Pipeline, errors: string[]): void {
     if (expected.join(",") !== got.join(",")) {
       errors.push(`role ${roleId} stages [${expected.join(", ")}] do not match graph [${got.join(", ")}]`);
     }
+    if (role.folder !== `agents/${roleId}`) {
+      errors.push(`role ${roleId} folder must be agents/${roleId}`);
+    }
     for (const fileName of ROLE_FILES) {
       const full = path.join(pipeline.rootDir, role.folder, fileName);
       if (!fs.existsSync(full)) {
         errors.push(`role ${roleId} missing ${path.join(role.folder, fileName)}`);
+      } else if (fs.readFileSync(full, "utf8").trim().length === 0) {
+        errors.push(`role ${roleId} ${path.join(role.folder, fileName)} is empty`);
       }
     }
   }
@@ -356,6 +387,141 @@ function checkGraph(pipeline: Pipeline, errors: string[]): void {
   if (pipeline.humanGates["brief-questions"]?.required !== "conditional") {
     errors.push("brief-questions must be a conditional human gate");
   }
+
+  const ordered = [...pipeline.stages].sort((a, b) => a.order - b.order);
+  ordered.forEach((stage, index) => {
+    if (stage.order !== index + 1) {
+      errors.push(`stage ${stage.id} order is ${stage.order}; orders must be contiguous from 1`);
+    }
+  });
+
+  const outputOwners = new Map<string, string>();
+  const skillOwners = new Map<string, string>();
+  for (const stage of ordered) {
+    const next = ordered.find((item) => item.order === stage.order + 1);
+    if (stage.verdictValues) {
+      if (stage.onSuccess) {
+        errors.push(`stage ${stage.id} uses verdict transitions and must not set onSuccess`);
+      }
+      assertTransitionTarget(pipeline, stage, stage.onApprove, "onApprove", next?.id, errors);
+      const sendBack = pipeline.stages.find((item) => item.id === stage.onSendBack);
+      if (sendBack && sendBack.order >= stage.order) {
+        errors.push(`stage ${stage.id} onSendBack must point at an earlier stage`);
+      }
+    } else if (!stage.onSuccess) {
+      errors.push(`stage ${stage.id} needs onSuccess`);
+    } else {
+      assertTransitionTarget(pipeline, stage, stage.onSuccess, "onSuccess", next?.id, errors);
+    }
+    if (stage.separateSessionFrom && !pipeline.roles[stage.separateSessionFrom]) {
+      errors.push(`stage ${stage.id} separateSessionFrom is not a role`);
+    }
+    if (skillOwners.has(stage.skill)) {
+      errors.push(`skill ${stage.skill} is used by ${skillOwners.get(stage.skill)} and ${stage.id}`);
+    }
+    skillOwners.set(stage.skill, stage.id);
+    for (const artifact of stage.outputs) {
+      const owner = outputOwners.get(artifact.path);
+      if (owner) {
+        errors.push(`output path ${artifact.path} is produced by ${owner} and ${stage.id}`);
+      }
+      outputOwners.set(artifact.path, stage.id);
+    }
+    checkSkillFile(pipeline, stage, errors);
+  }
+
+  for (const gate of Object.values(pipeline.humanGates)) {
+    if (gate.resume === "done") {
+      continue;
+    }
+    const after = pipeline.stages.find((stage) => stage.id === gate.after);
+    const resume = pipeline.stages.find((stage) => stage.id === gate.resume);
+    if (after && resume && resume.order <= after.order) {
+      errors.push(`human gate ${gate.id} resume must be a stage after ${gate.after}`);
+    }
+  }
+}
+
+function assertTransitionTarget(
+  pipeline: Pipeline,
+  stage: Stage,
+  target: string | undefined,
+  field: string,
+  nextStageId: string | undefined,
+  errors: string[],
+): void {
+  if (!target) {
+    return;
+  }
+  const gate = pipeline.humanGates[target];
+  if (gate) {
+    if (gate.after !== stage.id) {
+      errors.push(`stage ${stage.id} ${field} gate ${target} is not after this stage`);
+    }
+    return;
+  }
+  if (target !== nextStageId) {
+    errors.push(`stage ${stage.id} ${field} must be the next stage${nextStageId ? ` (${nextStageId})` : ""} or a human gate after this stage`);
+  }
+}
+
+function checkSkillFile(pipeline: Pipeline, stage: Stage, errors: string[]): void {
+  const full = path.join(pipeline.rootDir, stage.skill);
+  if (!fs.existsSync(full)) {
+    return;
+  }
+  const text = fs.readFileSync(full, "utf8");
+  const frontmatter = parseFrontmatter(text);
+  if (!frontmatter) {
+    errors.push(`${stage.skill}: missing YAML frontmatter (name, description, stage, role)`);
+    return;
+  }
+  const folder = path.basename(path.dirname(stage.skill));
+  if (frontmatter.name !== folder) {
+    errors.push(`${stage.skill}: frontmatter name must be ${folder}`);
+  }
+  if (!frontmatter.description?.trim()) {
+    errors.push(`${stage.skill}: frontmatter description is empty`);
+  }
+  if (frontmatter.stage !== stage.id) {
+    errors.push(`${stage.skill}: frontmatter stage is "${frontmatter.stage ?? ""}"; expected ${stage.id}`);
+  }
+  if (frontmatter.role !== stage.role) {
+    errors.push(`${stage.skill}: frontmatter role is "${frontmatter.role ?? ""}"; expected ${stage.role}`);
+  }
+  const lines = new Set(text.split(/\r?\n/).map((line) => line.trim()));
+  for (const section of SKILL_SECTIONS) {
+    if (!lines.has(section)) {
+      errors.push(`${stage.skill}: missing section ${section}`);
+    }
+  }
+}
+
+export function parseFrontmatter(text: string): Record<string, string> | null {
+  if (!text.startsWith("---\n") && !text.startsWith("---\r\n")) {
+    return null;
+  }
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) {
+    return null;
+  }
+  const block = text.slice(text.indexOf("\n") + 1, end);
+  let document: unknown;
+  try {
+    document = parse(block);
+  } catch {
+    return null;
+  }
+  if (!isRecord(document)) {
+    return null;
+  }
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(document)) {
+    if (typeof value === "string") {
+      fields[key] = value;
+    }
+  }
+  return fields;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
