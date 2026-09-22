@@ -1,0 +1,17 @@
+{
+  "epic": {
+    "id": "10001",
+    "key": "OPS-10",
+    "self": "https://example.atlassian.net/rest/api/3/issue/10001"
+  },
+  "issues": [
+    { "id": "10002", "key": "OPS-11" },
+    { "id": "10003", "key": "OPS-12" },
+    { "id": "10004", "key": "OPS-13" },
+    { "id": "10005", "key": "OPS-14" },
+    { "id": "10006", "key": "OPS-15" },
+    { "id": "10007", "key": "OPS-16" },
+    { "id": "10008", "key": "OPS-17" },
+    { "id": "10009", "key": "OPS-18" }
+  ]
+}

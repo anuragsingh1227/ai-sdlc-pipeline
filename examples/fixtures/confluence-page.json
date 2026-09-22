@@ -1,0 +1,17 @@
+{
+  "id": "1042",
+  "type": "page",
+  "title": "Order explain",
+  "status": "current",
+  "space": { "key": "OPS" },
+  "_links": {
+    "base": "https://example.atlassian.net/wiki",
+    "webui": "/spaces/OPS/pages/1042/Order-explain"
+  },
+  "body": {
+    "storage": {
+      "representation": "storage",
+      "value": "<h1>Order explain</h1><p>Support agents spend several minutes reconstructing why an order is delayed. Add an <strong>Explain this order</strong> action on the internal order detail screen.</p><h2>Who</h2><ul><li>Internal support agents who already have <strong>ORDER_READ</strong>.</li><li>Customers do not see this control.</li></ul><h2>Rules</h2><ul><li>Server-side calls use the existing internal LLM gateway. No new model vendor.</li><li>If the order has no events, show a fixed sentence and do not call the model.</li><li>The action must not change order status.</li></ul><h2>Not in this work</h2><ul><li>No customer-facing chat and no email to the customer.</li><li>No new ECS service.</li><li>No free-form multi-turn conversation.</li></ul>"
+    }
+  }
+}

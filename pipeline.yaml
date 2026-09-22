@@ -1,0 +1,257 @@
+# Deterministic phase graph for the AI SDLC control plane.
+# The orchestrator reads this file and artifact paths. It does not call a model.
+# Workers (Grok Build, Cursor, Claude Code, Codex) execute a single stage per session.
+
+version: 1
+name: ai-sdlc-pipeline
+artifactRoot: runs
+
+orchestrator:
+  llm: false
+  routesBy: pipeline.yaml
+
+# Critics are different roles from the authors they review.
+# A run manifest must record different session ids for each pair.
+separation:
+  specCriticMustDifferFrom: spec-writer
+  codeCriticMustDifferFrom: implementer
+
+roles:
+  spec-writer:
+    title: Spec writer
+    folder: agents/spec-writer
+    stages: [confluence-brief, spec-draft]
+  spec-critic:
+    title: Spec critic
+    folder: agents/spec-critic
+    stages: [spec-critic]
+  jira-ac:
+    title: AC / Jira agent
+    folder: agents/jira-ac
+    stages: [jira-ac]
+  implementer:
+    title: Implementer
+    folder: agents/implementer
+    stages: [implement]
+  code-critic-release:
+    title: Code critic and release
+    folder: agents/code-critic-release
+    stages: [code-critic, release]
+
+# Human gates are nodes in the graph. Agents never pass them.
+humanGates:
+  brief-questions:
+    after: confluence-brief
+    required: conditional
+    condition: brief.meta.openQuestions is non-empty
+    resume: spec-draft
+    prompt: Resolve open questions in the brief, then record the gate as passed.
+  spec-approved:
+    after: spec-critic
+    required: true
+    whenVerdict: approve
+    resume: jira-ac
+    prompt: A human confirms the critic-approved spec before tickets or code.
+  merge:
+    after: release
+    required: true
+    resume: done
+    prompt: A human reviews the merge request and merges it. Agents do not merge.
+
+stages:
+  - id: confluence-brief
+    order: 1
+    label: Confluence brief
+    type: agent
+    role: spec-writer
+    skill: skills/confluence-brief/SKILL.md
+    retryLimit: 2
+    inputs:
+      - name: confluence-page
+        required: true
+        source: human
+        path: "{run}/00-source/page.md"
+        note: Durable export of the Confluence page. The URL lives in the run manifest or brief meta.
+    outputs:
+      - name: brief
+        path: "{run}/01-brief/brief.md"
+        template: templates/confluence-brief.md
+        requiredHeadings:
+          - "## Goals"
+          - "## Users"
+          - "## Constraints"
+          - "## Out of scope"
+          - "## Open questions"
+      - name: brief-meta
+        path: "{run}/01-brief/brief.meta.yaml"
+        requiredFields:
+          - source.url
+          - source.pageId
+          - openQuestions
+    onSuccess: brief-questions
+    onReject: brief-questions
+
+  - id: spec-draft
+    order: 2
+    label: Spec draft
+    type: agent
+    role: spec-writer
+    skill: skills/write-spec/SKILL.md
+    retryLimit: 3
+    inputs:
+      - name: brief
+        path: "{run}/01-brief/brief.md"
+        required: true
+      - name: brief-meta
+        path: "{run}/01-brief/brief.meta.yaml"
+        required: true
+    outputs:
+      - name: feature-spec
+        path: "{run}/02-spec/feature-spec.md"
+        template: templates/feature-spec.md
+        requiredHeadings:
+          - "## Problem"
+          - "## Proposal"
+          - "## Behavior"
+          - "## API"
+          - "## UI"
+          - "## Data"
+          - "## Test plan"
+          - "## Out of scope"
+    onSuccess: spec-critic
+
+  - id: spec-critic
+    order: 3
+    label: Spec critic
+    type: agent
+    role: spec-critic
+    skill: skills/critique-spec/SKILL.md
+    separateSessionFrom: spec-writer
+    retryLimit: 3
+    escalateTo: spec-approved
+    inputs:
+      - name: confluence-page
+        path: "{run}/00-source/page.md"
+        required: true
+      - name: brief
+        path: "{run}/01-brief/brief.md"
+        required: true
+      - name: brief-meta
+        path: "{run}/01-brief/brief.meta.yaml"
+        required: true
+      - name: feature-spec
+        path: "{run}/02-spec/feature-spec.md"
+        required: true
+    outputs:
+      - name: verdict
+        path: "{run}/03-spec-critic/verdict.md"
+        requiredHeadings:
+          - "## Verdict"
+          - "## Gaps"
+    verdictValues: [approve, send-back]
+    onApprove: spec-approved
+    onSendBack: spec-draft
+
+  - id: jira-ac
+    order: 4
+    label: Jira acceptance criteria
+    type: agent
+    role: jira-ac
+    skill: skills/write-jira-ac/SKILL.md
+    requiresGate: spec-approved
+    retryLimit: 2
+    inputs:
+      - name: feature-spec
+        path: "{run}/02-spec/feature-spec.md"
+        required: true
+      - name: spec-verdict
+        path: "{run}/03-spec-critic/verdict.md"
+        required: true
+    outputs:
+      - name: acceptance-criteria
+        path: "{run}/04-jira/acceptance-criteria.md"
+        template: templates/acceptance-criteria.md
+        requiredHeadings:
+          - "## Stories"
+      - name: tickets
+        path: "{run}/04-jira/tickets.yaml"
+    onSuccess: implement
+
+  - id: implement
+    order: 5
+    label: Implement
+    type: agent
+    role: implementer
+    skill: skills/implement-feature/SKILL.md
+    retryLimit: 3
+    inputs:
+      - name: acceptance-criteria
+        path: "{run}/04-jira/acceptance-criteria.md"
+        required: true
+        contract: true
+      - name: tickets
+        path: "{run}/04-jira/tickets.yaml"
+        required: true
+    outputs:
+      - name: change-summary
+        path: "{run}/05-implement/change-summary.md"
+        requiredHeadings:
+          - "## Product repo changes"
+          - "## Tests"
+          - "## Scope check"
+    onSuccess: code-critic
+
+  - id: code-critic
+    order: 6
+    label: Code critic
+    type: agent
+    role: code-critic-release
+    skill: skills/critique-code/SKILL.md
+    separateSessionFrom: implementer
+    retryLimit: 3
+    escalateTo: merge
+    inputs:
+      - name: acceptance-criteria
+        path: "{run}/04-jira/acceptance-criteria.md"
+        required: true
+      - name: change-summary
+        path: "{run}/05-implement/change-summary.md"
+        required: true
+    outputs:
+      - name: review
+        path: "{run}/06-code-critic/review.md"
+        requiredHeadings:
+          - "## Verdict"
+          - "## Findings"
+          - "## Edge cases"
+    verdictValues: [approve, send-back]
+    onApprove: release
+    onSendBack: implement
+
+  - id: release
+    order: 7
+    label: Release
+    type: agent
+    role: code-critic-release
+    skill: skills/open-mr/SKILL.md
+    retryLimit: 2
+    inputs:
+      - name: review
+        path: "{run}/06-code-critic/review.md"
+        required: true
+      - name: change-summary
+        path: "{run}/05-implement/change-summary.md"
+        required: true
+      - name: acceptance-criteria
+        path: "{run}/04-jira/acceptance-criteria.md"
+        required: true
+    outputs:
+      - name: mr-description
+        path: "{run}/07-release/mr-description.md"
+        template: templates/mr-description.md
+        requiredHeadings:
+          - "## Summary"
+          - "## Acceptance criteria"
+          - "## Test plan"
+          - "## Deploy"
+    onSuccess: merge
