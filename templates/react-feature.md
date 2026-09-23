@@ -43,6 +43,7 @@ export function OrderExplainPanel({ orderId }: { orderId: string }) {
       </button>
       {explanation.status === "loading" && <p role="status">Explaining order</p>}
       {explanation.status === "error" && <p role="alert">{explanation.message}</p>}
+      {explanation.status === "empty" && <p role="status">No order events are available to explain.</p>}
       {explanation.status === "ready" && (
         <>
           <p>{explanation.text}</p>

@@ -4,8 +4,8 @@ Confluence and Jira clients live here. The orchestrator does not import a model 
 
 | File | Behavior |
 | --- | --- |
-| `confluence.ts` | `getPage(idOrUrl)` via Confluence Cloud REST, or `examples/fixtures/confluence-page.json` when `--mock` / `PIPELINE_MOCK_ATLASSIAN=1` |
-| `jira.ts` | `createIssuesFromTicketsYaml` via Jira Cloud REST API v3, or the Jira fixture in mock mode |
+| `confluence.ts` | `getPage(idOrUrl)` via Confluence Cloud REST, or `examples/fixtures/confluence-page.json` when `--mock` / `PIPELINE_MOCK_ATLASSIAN=1`. Base URLs are https only. |
+| `jira.ts` | `createIssuesFromTicketsYaml` via Jira Cloud REST API v3, or the Jira fixture in mock mode. `tickets.project` must match `JIRA_PROJECT_KEY` when that variable is set. |
 
 Commands:
 

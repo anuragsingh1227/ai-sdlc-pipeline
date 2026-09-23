@@ -104,7 +104,7 @@ npm test
 npm run typecheck
 
 # Recorded Confluence page -> markdown export
-npx tsx src/cli.ts confluence fetch --page 1042 --out /tmp/order-explain/00-source --mock
+npx tsx src/cli.ts confluence fetch --page 1042 --out runs/order-explain/00-source --mock
 
 # Sample is already at the merge gate. Dry-run stops there and writes nothing.
 npx tsx src/cli.ts run --run examples/sample-run --dry-run
@@ -131,11 +131,11 @@ npx tsx src/cli.ts jira push --run runs/my-feature --apply
 
 | Worker | Argv |
 | --- | --- |
-| grok | `grok -p --prompt-file <run>/.pipeline/task.md` |
-| claude | `claude -p <task text>` |
-| codex | `codex exec <task text>` |
+| grok | `grok --prompt-file <run>/.pipeline/task.md --sandbox workspace` (Read/Edit denied on `manifest.yaml`) |
+| claude | `claude -p --append-system-prompt-file <run>/.pipeline/task.md` (task also on stdin) |
+| codex | `codex exec -` with `<run>/.pipeline/task.md` on stdin |
 
-The task file contains that stage's `SYSTEM.md`, skill, and artifact paths. Default `--worker none` only copies a template and marks it `pipeline-draft`, which `validate` rejects until a worker replaces it.
+The task file contains that stage's `SYSTEM.md`, skill, and artifact paths. The prompt is not passed on the command line. The worker's working directory is the run directory (`implement` uses `manifest.productRepo`), and token, password, and secret variables are removed from its environment. Default `--worker none` copies a template, writes `.pipeline/task.md`, and marks the scaffold `pipeline-draft`, which `validate` rejects until a worker replaces it.
 
 What you still do outside this repo:
 
@@ -180,7 +180,7 @@ Host notes: [`docs/HOSTS.md`](docs/HOSTS.md).
 | [`examples/sample-run/`](examples/sample-run/) | Order explain artifact chain |
 | [`orchestrator/README.md`](orchestrator/README.md) | How sequencing and human gates work |
 | [`integrations/`](integrations/) | Confluence and Jira REST clients, with fixture mode for CI |
-| [`.env.example`](.env.example) | Placeholder names for `CONFLUENCE_*`, `JIRA_*`, and `GIT_HOST` |
+| [`.env.example`](.env.example) | Placeholder names for `CONFLUENCE_*` and `JIRA_*` |
 
 ## Rules that are not optional
 

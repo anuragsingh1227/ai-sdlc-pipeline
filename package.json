@@ -12,7 +12,7 @@
     "check": "tsx src/cli.ts check",
     "validate": "tsx src/cli.ts validate --run examples/sample-run",
     "status": "tsx src/cli.ts status --run examples/sample-run",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/atlassian.test.ts src/pipeline.test.ts src/runner.test.ts src/security.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

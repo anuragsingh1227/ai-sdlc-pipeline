@@ -22,6 +22,16 @@ test("storage HTML becomes markdown headings and list items", () => {
   assert.match(markdown, /- No new ECS service/);
 });
 
+test("storage macros keep code and panel text", () => {
+  const markdown = storageToMarkdown(
+    '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">java</ac:parameter><ac:plain-text-body><![CDATA[class Explain {}]]></ac:plain-text-body></ac:structured-macro><ac:structured-macro ac:name="info"><ac:rich-text-body><p>Panel text stays.</p></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="toc"></ac:structured-macro>',
+  );
+  assert.match(markdown, /```java/);
+  assert.match(markdown, /class Explain \{\}/);
+  assert.match(markdown, /Panel text stays/);
+  assert.doesNotMatch(markdown, /ac:structured-macro/);
+});
+
 test("page ids and Confluence URLs parse", () => {
   assert.equal(parseConfluencePageRef("1042").pageId, "1042");
   const parsed = parseConfluencePageRef("https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain");
@@ -29,13 +39,14 @@ test("page ids and Confluence URLs parse", () => {
   assert.equal(parsed.baseUrlFromUrl, "https://example.atlassian.net/wiki");
 });
 
-test("mock confluence fetch writes page.md without network", async () => {
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), "confluence-out-"));
+test("mock confluence fetch writes page.md under runs/ without network", async () => {
+  const outRel = path.join("runs", `confluence-out-${process.pid}-${Date.now()}`);
+  const out = path.join(repoRoot, outRel);
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
     const code = await main(
-      ["confluence", "fetch", "--page", "1042", "--out", out, "--mock"],
+      ["confluence", "fetch", "--page", "1042", "--out", outRel, "--mock"],
       () => undefined,
       () => undefined,
     );
@@ -45,6 +56,7 @@ test("mock confluence fetch writes page.md without network", async () => {
     assert.match(page, /ORDER_READ/);
     assert.match(page, /Page id: 1042/);
   } finally {
+    fs.rmSync(out, { recursive: true, force: true });
     process.chdir(previous);
   }
 });
@@ -71,11 +83,15 @@ test("live confluence request keeps the token out of the URL", async () => {
     const fixture = fs.readFileSync(confluenceFixture, "utf8");
     return new Response(fixture, { status: 200 });
   };
-  const page = await getPage("https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain", {
+  const page = await getPage("https://evil.example/wiki/spaces/OPS/pages/1042/Order-explain", {
     env,
     fetchImpl,
   });
   assert.equal(page.id, "1042");
+  assert.match(requested, /^https:\/\/example\.atlassian\.net\//);
+  assert.equal(requested.includes("evil.example"), false);
+  assert.match(page.markdown, /Panel text stays/);
+  assert.match(page.markdown, /```java/);
   assert.ok(!requested.includes("token-value"));
   assert.match(requested, /\/wiki\/rest\/api\/content\/1042/);
   const written = await writeConfluenceExport(page, fs.mkdtempSync(path.join(os.tmpdir(), "conf-live-")));

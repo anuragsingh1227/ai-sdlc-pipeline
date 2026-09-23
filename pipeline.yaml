@@ -12,6 +12,7 @@ orchestrator:
 
 # Critics are different roles from the authors they review.
 # A run manifest must record different session ids for each pair.
+# Those ids are advisory: validate compares the strings and cannot see the host session.
 separation:
   specCriticMustDifferFrom: spec-writer
   codeCriticMustDifferFrom: implementer
@@ -217,6 +218,10 @@ stages:
       - name: change-summary
         path: "{run}/05-implement/change-summary.md"
         required: true
+      - name: product-diff
+        path: "{run}/05-implement/product.diff"
+        required: false
+        note: Optional diff. The stage also accepts manifest productRepo and branch together.
     outputs:
       - name: review
         path: "{run}/06-code-critic/review.md"

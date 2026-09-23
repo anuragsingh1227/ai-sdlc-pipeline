@@ -67,6 +67,15 @@ export interface Artifact {
 export interface RunManifest {
   featureId?: string;
   title?: string;
+  /** Product checkout used as the implement worker cwd. Resolved from the pipeline root. */
+  productRepo?: string;
+  /** Product branch the code critic can review when no product diff file is present. */
+  branch?: string;
+  /**
+   * sha256 of `02-spec/feature-spec.md` recorded when a human sets `spec-approved: passed`.
+   * A mismatch or a spec-critic send-back blocks that gate again.
+   */
+  specApproval?: { sha256: string };
   sessions: Record<string, string>;
   gates: Record<string, string>;
   attempts: Record<string, number>;
@@ -74,6 +83,8 @@ export interface RunManifest {
 
 export interface BriefMeta {
   openQuestions: string[];
+  /** Set when `openQuestions` is missing or not a list of strings. Conditional gates fail closed. */
+  malformed?: boolean;
 }
 
 export type NextAction =

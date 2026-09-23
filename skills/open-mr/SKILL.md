@@ -16,7 +16,7 @@ The code critic verdict is `approve` and `pipeline status` names stage `release`
 1. Read the verdict. If it is not `approve`, stop and return to critique or implement. Do not open an MR for a send-back.
 2. Read the change summary, the AC, and `templates/mr-description.md`.
 3. Write `07-release/mr-description.md` with Summary, Acceptance criteria, Test plan, and Deploy.
-4. If the host is already authenticated to `GIT_HOST`, open the MR against the product repo's default branch and paste the URL into the summary. If it is not authenticated, leave the URL as "not opened yet" and stop. Do not invent credentials.
+4. The CLI does not open merge requests. Write the MR body and leave the URL as "not opened yet". A human opens the MR against the product repo's default branch. Do not invent credentials.
 5. In Deploy, state whether a dev deploy is needed. Default: a human deploys to dev after merge, using the product pipeline. Do not run a production deploy.
 6. Leave `gates.merge` as `pending`.
 

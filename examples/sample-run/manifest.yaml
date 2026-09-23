@@ -1,11 +1,15 @@
 featureId: order-explain
 title: Order explain
 productRepo: ../commerce-console
+branch: feature/order-explain
+specApproval:
+  sha256: 1fbfaa6bca706ccd36260954d1bae52bc4abcfb31b70d4f3a5d18b84fe460399
 source:
   kind: confluence
   url: https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain
   pageId: "1042"
   export: 00-source/page.md
+# Advisory. validate compares these strings and cannot see the host session.
 sessions:
   spec-writer: writer-session-01
   spec-critic: critic-session-01

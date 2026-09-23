@@ -19,7 +19,7 @@ Live Confluence Cloud (`GET /wiki/rest/api/content/{id}?expand=body.storage`):
 npx tsx src/cli.ts confluence fetch --page 1042 --out runs/<feature-id>/00-source
 ```
 
-Auth is HTTP Basic, `CONFLUENCE_EMAIL`:`CONFLUENCE_API_TOKEN`. The client turns storage HTML into markdown and writes `00-source/page.md`. A page URL such as `https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Title` is accepted. The token is never placed in the URL.
+Auth is HTTP Basic, `CONFLUENCE_EMAIL`:`CONFLUENCE_API_TOKEN`. The client turns storage HTML into markdown and writes `00-source/page.md`. Code macros become fenced blocks. Panel, info, note, warning, and tip macros keep their text. `--out` must be a relative path under `runs/` (for example `runs/<feature-id>/00-source`). Absolute paths and `..` are rejected. A page URL such as `https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Title` supplies the page id only. It does not replace `CONFLUENCE_BASE_URL`. That base URL must be `https` on `*.atlassian.net`, or the exact host named by `ATLASSIAN_ALLOW_HOST`. The override does not allow link-local, loopback, metadata, or private IP hosts. Redirects are refused (`redirect: "error"`). The token is never placed in the URL.
 
 Without credentials and without `--mock` / `PIPELINE_MOCK_ATLASSIAN=1`, the command fails and names the missing variables.
 

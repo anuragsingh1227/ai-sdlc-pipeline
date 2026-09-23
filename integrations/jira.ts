@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
+import { assertAtlassianRequestUrl, assertConfiguredBaseUrl, fetchAtlassian } from "../src/atlassian-url.js";
 import { basicAuthHeader, siteBaseUrl, type AtlassianEnv } from "../src/env.js";
+import { isUnderExamples } from "../src/paths.js";
 
 export interface JiraIssuePlan {
   key?: string;
@@ -27,16 +29,29 @@ export interface JiraClientOptions {
   env?: AtlassianEnv;
   fetchImpl?: typeof fetch;
   fixturePath?: string;
+  /** Write keys back into a run under examples/. Off by default. */
+  force?: boolean;
+  /** Repo root used to detect examples/. Defaults to the process working directory. */
+  repoRoot?: string;
 }
 
 interface TicketFile {
   project: string;
-  epic: { issueType?: string; summary?: string; description?: string; key?: string; labels?: string[] };
+  epic: {
+    issueType?: string;
+    summary?: string;
+    description?: string;
+    key?: string;
+    labels?: string[];
+    components?: string[];
+  };
   stories: Array<Record<string, unknown>>;
 }
 
 const MISSING_CREDENTIALS =
   "Jira credentials are not set. Export JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, and JIRA_PROJECT_KEY, or pass --mock / set PIPELINE_MOCK_ATLASSIAN=1.";
+
+const JIRA_ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 
 export function plainTextToAdf(text: string): { type: "doc"; version: 1; content: unknown[] } {
   const lines = text.split(/\r?\n/).map((line) => line.trimEnd());
@@ -59,6 +74,10 @@ export function buildCreatePayload(input: {
   description: string;
   labels?: string[];
   parentKey?: string;
+  components?: string[];
+  /** Company-managed Epic Link field id, when known. Team-managed projects use `parent`. */
+  epicLinkField?: string;
+  epicLinkKey?: string;
 }): Record<string, unknown> {
   const fields: Record<string, unknown> = {
     project: { key: input.project },
@@ -69,10 +88,31 @@ export function buildCreatePayload(input: {
   if (input.labels && input.labels.length > 0) {
     fields.labels = input.labels;
   }
+  if (input.components && input.components.length > 0) {
+    fields.components = input.components.map((name) => ({ name }));
+  }
   if (input.parentKey) {
     fields.parent = { key: input.parentKey };
   }
+  if (input.epicLinkField && input.epicLinkKey) {
+    fields[input.epicLinkField] = input.epicLinkKey;
+  }
   return { fields };
+}
+
+/**
+ * `parent: epic` means the epic in this tickets file (its key, once created).
+ * Any other value must already be a Jira issue key.
+ */
+export function resolveStoryParent(parent: string, epicKey: string | undefined): string | undefined {
+  const trimmed = parent.trim();
+  if (trimmed.length === 0 || trimmed === "epic") {
+    return epicKey;
+  }
+  if (!JIRA_ISSUE_KEY.test(trimmed)) {
+    throw new Error(`story parent must be "epic" or a Jira issue key, found "${trimmed}"`);
+  }
+  return trimmed;
 }
 
 export async function createIssuesFromTicketsYaml(
@@ -81,11 +121,19 @@ export async function createIssuesFromTicketsYaml(
 ): Promise<JiraPushResult> {
   const absolute = path.resolve(ticketsPath);
   const tickets = readTickets(absolute);
-  const project = options.env?.jiraProjectKey || tickets.project;
+  assertStoryParents(tickets.stories);
+  if (options.env?.jiraProjectKey && options.env.jiraProjectKey !== tickets.project) {
+    throw new Error(
+      `tickets.project "${tickets.project}" does not match JIRA_PROJECT_KEY "${options.env.jiraProjectKey}"`,
+    );
+  }
+  const project = tickets.project;
   const mode = resolveMode(options);
   if (mode === "live") {
     assertJiraEnv(options.env);
+    assertConfiguredBaseUrl(options.env?.jiraBaseUrl ?? "", { allowHost: options.env?.atlassianAllowHost });
   }
+  assertExamplesWritable(absolute, options, mode);
 
   const epicDescription = stringField(tickets.epic.description) || tickets.epic.summary || "Epic";
   const epicPlan: JiraIssuePlan = {
@@ -141,21 +189,35 @@ export async function createIssuesFromTicketsYaml(
     throw new Error(MISSING_CREDENTIALS);
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const base = siteBaseUrl(env.jiraBaseUrl);
-  epicPlan.key = await upsertIssue(base, env, fetchImpl, project, epicPlan);
-  for (const story of storyPlans) {
-    story.key = await upsertIssue(base, env, fetchImpl, project, story, epicPlan.key);
-  }
+  const configured = assertConfiguredBaseUrl(env.jiraBaseUrl, { allowHost: env.atlassianAllowHost });
+  const host = configured.hostname.toLowerCase();
+  const base = siteBaseUrl(configured.toString());
+  const epicLinkField = await resolveEpicLinkField(base, host, env, fetchImpl);
   const result: JiraPushResult = {
     mode: "live",
     project,
-    epicKey: epicPlan.key,
     issues: [epicPlan, ...storyPlans],
   };
-  const resultPath = path.join(path.dirname(absolute), "push-result.json");
-  fs.writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
-  writeKeys(absolute, epicPlan.key, storyPlans);
-  result.resultPath = resultPath;
+
+  epicPlan.key = await upsertIssue(base, host, env, fetchImpl, project, epicPlan, {
+    components: stringList(tickets.epic.components),
+  });
+  result.epicKey = epicPlan.key;
+  persistProgress(absolute, result);
+
+  for (let index = 0; index < storyPlans.length; index += 1) {
+    const story = storyPlans[index];
+    const source = tickets.stories[index];
+    const parentKey = resolveStoryParent(stringField(source?.parent), epicPlan.key);
+    story.key = await upsertIssue(base, host, env, fetchImpl, project, story, {
+      parentKey,
+      components: stringList(source?.components),
+      epicLinkField,
+      epicLinkKey: epicPlan.key,
+    });
+    result.epicKey = epicPlan.key;
+    persistProgress(absolute, result);
+  }
   return result;
 }
 
@@ -189,13 +251,77 @@ function assertJiraEnv(env: AtlassianEnv | undefined): void {
   }
 }
 
+interface IssueWriteOptions {
+  parentKey?: string;
+  components?: string[];
+  epicLinkField?: string;
+  epicLinkKey?: string;
+}
+
+const EPIC_LINK_CUSTOM = "com.pyxis.greenhopper.jira:gh-epic-link";
+
+/**
+ * Best-effort company-managed Epic Link id.
+ * `JIRA_EPIC_LINK_FIELD` wins. Otherwise GET /rest/api/3/field.
+ * A failed lookup keeps `parent` only so team-managed projects still push.
+ */
+async function resolveEpicLinkField(
+  base: string,
+  configuredHost: string,
+  env: AtlassianEnv,
+  fetchImpl: typeof fetch,
+): Promise<string | undefined> {
+  if (env.jiraEpicLinkField) {
+    return env.jiraEpicLinkField;
+  }
+  try {
+    const url = assertAtlassianRequestUrl(`${base}/rest/api/3/field`, configuredHost);
+    const token = env.jiraToken ?? "";
+    const response = await fetchAtlassian(
+      url,
+      {
+        method: "GET",
+        headers: {
+          Authorization: basicAuthHeader(env.jiraEmail ?? "", token),
+          Accept: "application/json",
+        },
+      },
+      fetchImpl,
+      configuredHost,
+    );
+    if (!response.ok) {
+      await response.text();
+      return undefined;
+    }
+    const body = (await response.json()) as unknown;
+    if (!Array.isArray(body)) {
+      return undefined;
+    }
+    for (const field of body) {
+      if (!isRecord(field) || typeof field.id !== "string") {
+        continue;
+      }
+      const schema = isRecord(field.schema) ? field.schema : {};
+      const custom = typeof schema.custom === "string" ? schema.custom : "";
+      const name = typeof field.name === "string" ? field.name : "";
+      if (name === "Epic Link" || custom === EPIC_LINK_CUSTOM) {
+        return field.id;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 async function upsertIssue(
   base: string,
+  configuredHost: string,
   env: AtlassianEnv,
   fetchImpl: typeof fetch,
   project: string,
   issue: JiraIssuePlan,
-  parentKey?: string,
+  write: IssueWriteOptions = {},
 ): Promise<string> {
   const payload = buildCreatePayload({
     project,
@@ -203,28 +329,37 @@ async function upsertIssue(
     summary: issue.summary,
     description: issue.description,
     labels: issue.labels,
-    parentKey: issue.issueType === "Epic" ? undefined : parentKey,
+    components: write.components,
+    parentKey: issue.issueType === "Epic" ? undefined : write.parentKey,
+    epicLinkField: issue.issueType === "Epic" ? undefined : write.epicLinkField,
+    epicLinkKey: issue.issueType === "Epic" ? undefined : write.epicLinkKey,
   });
   const token = env.jiraToken ?? "";
   const existing = issue.key;
-  const url = existing ? `${base}/rest/api/3/issue/${encodeURIComponent(existing)}` : `${base}/rest/api/3/issue`;
+  const url = assertAtlassianRequestUrl(
+    existing ? `${base}/rest/api/3/issue/${encodeURIComponent(existing)}` : `${base}/rest/api/3/issue`,
+    configuredHost,
+  );
   const fields = payload.fields as Record<string, unknown>;
-  const bodyDocument = existing
-    ? { fields: { summary: fields.summary, description: fields.description } }
-    : payload;
+  const bodyDocument = existing ? fieldsForUpdate(fields) : payload;
   const serialized = JSON.stringify(bodyDocument);
   if (url.includes(token) || serialized.includes(token)) {
     throw new Error("Refusing to send the Jira API token in the URL or body.");
   }
-  const response = await fetchImpl(url, {
-    method: existing ? "PUT" : "POST",
-    headers: {
-      Authorization: basicAuthHeader(env.jiraEmail ?? "", token),
-      Accept: "application/json",
-      "Content-Type": "application/json",
+  const response = await fetchAtlassian(
+    url,
+    {
+      method: existing ? "PUT" : "POST",
+      headers: {
+        Authorization: basicAuthHeader(env.jiraEmail ?? "", token),
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: serialized,
     },
-    body: serialized,
-  });
+    fetchImpl,
+    configuredHost,
+  );
   const body = await response.text();
   if (!response.ok) {
     throw new Error(`Jira ${existing ? "PUT" : "POST"} /rest/api/3/issue failed: HTTP ${response.status} ${clip(body)}`);
@@ -237,6 +372,48 @@ async function upsertIssue(
     throw new Error("Jira create response did not include an issue key.");
   }
   return created.key;
+}
+
+function fieldsForUpdate(fields: Record<string, unknown>): { fields: Record<string, unknown> } {
+  const update: Record<string, unknown> = {
+    summary: fields.summary,
+    description: fields.description,
+  };
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === "project" || key === "issuetype" || key === "summary" || key === "description") {
+      continue;
+    }
+    update[key] = value;
+  }
+  return { fields: update };
+}
+
+/** Write keys and push-result.json after every successful create or update. */
+function persistProgress(ticketsPath: string, result: JiraPushResult): void {
+  const resultPath = path.join(path.dirname(ticketsPath), "push-result.json");
+  fs.writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+  const stories = result.issues.filter((issue) => issue.issueType !== "Epic");
+  writeKeys(ticketsPath, result.epicKey, stories);
+  result.resultPath = resultPath;
+}
+
+function assertStoryParents(stories: Array<Record<string, unknown>>): void {
+  stories.forEach((story, index) => {
+    const parent = stringField(story.parent).trim();
+    if (parent !== "epic" && !JIRA_ISSUE_KEY.test(parent)) {
+      throw new Error(`story ${index + 1} parent must be "epic" or a Jira issue key, found "${parent || "(empty)"}"`);
+    }
+  });
+}
+
+function assertExamplesWritable(ticketsPath: string, options: JiraClientOptions, mode: "dry-run" | "mock" | "live"): void {
+  if (mode === "dry-run" || options.force) {
+    return;
+  }
+  const repoRoot = options.repoRoot ?? process.cwd();
+  if (isUnderExamples(repoRoot, ticketsPath)) {
+    throw new Error("Refusing to modify examples/. Copy the run out of examples/ or pass --force.");
+  }
 }
 
 function readTickets(filePath: string): TicketFile {

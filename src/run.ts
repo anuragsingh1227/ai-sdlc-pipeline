@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
+import { gateBlocks, isKnownGateCondition, retryBlockReason } from "./gates.js";
+import { resolveArtifact } from "./paths.js";
 import type {
   Artifact,
   BriefMeta,
@@ -12,14 +15,53 @@ import type {
   Stage,
 } from "./types.js";
 
+export { resolveArtifact } from "./paths.js";
+
 const GATE_STATES = new Set(["passed", "pending", "skipped"]);
 
 /** Appended when `pipeline run` copies a template. Validate refuses the stage until a worker replaces the draft. */
 export const DRAFT_LINE = "<!-- pipeline-draft: replace this scaffold before the stage can pass validate -->";
 
-export function resolveArtifact(runDir: string, artifactPath: string): string {
-  const relative = artifactPath.replace(/^\{run\}\/?/, "");
-  return path.join(runDir, relative);
+export const CODE_CRITIC_PRODUCT =
+  "code-critic needs a non-empty 05-implement/product.diff or manifest productRepo and branch";
+
+/** True when the code critic has a product diff file or both productRepo and branch. */
+export function codeCriticProductEvidence(runDir: string, manifest: RunManifest): boolean {
+  const diffPath = path.join(path.resolve(runDir), "05-implement", "product.diff");
+  if (fs.existsSync(diffPath) && fs.statSync(diffPath).isFile()) {
+    if (fs.readFileSync(diffPath, "utf8").trim().length > 0) {
+      return true;
+    }
+  }
+  return Boolean(manifest.productRepo?.trim() && manifest.branch?.trim());
+}
+
+/**
+ * A passed spec-approved gate counts only while feature-spec.md still matches the recorded hash.
+ * Returns a problem string when the gate is passed and the hash is missing or different.
+ */
+export function specApprovalProblem(runDir: string, manifest: RunManifest): string | null {
+  if (manifest.gates["spec-approved"] !== "passed") {
+    return null;
+  }
+  const specPath = path.join(path.resolve(runDir), "02-spec", "feature-spec.md");
+  if (!fs.existsSync(specPath)) {
+    return "spec-approved is passed but 02-spec/feature-spec.md is missing";
+  }
+  const digest = createHash("sha256").update(fs.readFileSync(specPath)).digest("hex");
+  const recorded = manifest.specApproval?.sha256?.trim().toLowerCase();
+  if (!recorded) {
+    return "spec-approved is passed but manifest specApproval.sha256 is missing";
+  }
+  if (recorded !== digest) {
+    return "spec-approved is passed but feature-spec.md hash does not match specApproval.sha256";
+  }
+  return null;
+}
+
+export function loadManifest(runDir: string): { manifest: RunManifest; errors: string[] } {
+  const errors: string[] = [];
+  return { manifest: readManifest(path.resolve(runDir), errors), errors };
 }
 
 export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
@@ -38,6 +80,10 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
   }
 
   const manifest = readManifest(absoluteRun, errors);
+  const specProblem = specApprovalProblem(absoluteRun, manifest);
+  if (specProblem) {
+    errors.push(specProblem);
+  }
   const briefMeta = readBriefMeta(pipeline, absoluteRun, errors);
   const ticketsChecked = { done: false };
 
@@ -48,7 +94,8 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
   for (const stage of stages) {
     if (stage.requiresGate) {
       const gate = pipeline.humanGates[stage.requiresGate];
-      if (gate && gateBlocks(gate, manifest, briefMeta)) {
+      if (gate && blocks(gate, manifest, briefMeta, absoluteRun, pipeline)) {
+        explainBlockedGate(gate, manifest, errors);
         flagArtifactsBeforeGate(absoluteRun, stages, stage.order, gate.id, errors);
         next = { kind: "gate", gate };
         break;
@@ -79,7 +126,10 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
           checkArtifactContents(absoluteRun, item.artifact, errors, ticketsChecked);
         }
       }
-      next = stageAction(absoluteRun, stage);
+      if (stage.id === "code-critic" && !codeCriticProductEvidence(absoluteRun, manifest)) {
+        errors.push(CODE_CRITIC_PRODUCT);
+      }
+      next = attemptStopAction(pipeline, absoluteRun, stage, manifest, errors) ?? stageAction(absoluteRun, stage);
       break;
     }
 
@@ -100,11 +150,22 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
       break;
     }
 
-    checkAttempts(stage, manifest, errors);
+    if (stage.id === "code-critic" && !codeCriticProductEvidence(absoluteRun, manifest)) {
+      errors.push(CODE_CRITIC_PRODUCT);
+      next = stageAction(absoluteRun, stage, "product diff or product repo is missing");
+      break;
+    }
+
+    const attemptStop = attemptStopAction(pipeline, absoluteRun, stage, manifest, errors);
+    if (attemptStop) {
+      next = attemptStop;
+      break;
+    }
     checkSeparation(pipeline, stage, manifest, errors);
 
+    let verdict: string | undefined;
     if (stage.verdictValues) {
-      const verdict = readVerdict(absoluteRun, stage);
+      verdict = readVerdict(absoluteRun, stage);
       if (!stage.verdictValues.includes(verdict)) {
         const verdictFile = stage.outputs.find((item) => item.name === "verdict" || item.name === "review");
         const where = verdictFile ? runRelative(verdictFile) : stage.id;
@@ -113,6 +174,9 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
         break;
       }
       if (verdict === "send-back") {
+        if (stage.id === "spec-critic" && manifest.gates["spec-approved"] === "passed") {
+          errors.push("spec-approved is passed but the spec critic verdict is send-back; clear the gate before continuing");
+        }
         const target = pipeline.stages.find((item) => item.id === stage.onSendBack);
         if (!target) {
           errors.push(`${stage.id} send-back target is missing`);
@@ -137,10 +201,9 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
     completed.push(stage.id);
 
     const gate = Object.values(pipeline.humanGates).find((item) => item.after === stage.id);
-    if (gate && gateBlocks(gate, manifest, briefMeta)) {
-      if (gate.required === "conditional" && manifest.gates[gate.id] === "skipped") {
-        errors.push(`gate ${gate.id} cannot be skipped while open questions remain`);
-      }
+    const verdictForGate = stage.verdictValues ? verdict : undefined;
+    if (gate && blocks(gate, manifest, briefMeta, absoluteRun, pipeline, verdictForGate)) {
+      explainBlockedGate(gate, manifest, errors);
       flagArtifactsBeforeGate(absoluteRun, stages, stage.order + 1, gate.id, errors);
       next = { kind: "gate", gate };
       break;
@@ -155,7 +218,12 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
   }
 
   checkGateVocabulary(pipeline, manifest, errors);
-  if (briefMeta && briefMeta.openQuestions.length === 0 && manifest.gates["brief-questions"] === "pending") {
+  if (
+    briefMeta &&
+    !briefMeta.malformed &&
+    briefMeta.openQuestions.length === 0 &&
+    manifest.gates["brief-questions"] === "pending"
+  ) {
     errors.push("brief-questions is pending but openQuestions is empty; mark the gate skipped or passed");
   }
 
@@ -236,39 +304,71 @@ function stageAction(runDir: string, stage: Stage, reason?: string): NextAction 
     stage,
     reason,
     inputs: stage.inputs.map((artifact) => ({
-      path: resolveArtifact(runDir, artifact.path),
+      path: safeResolve(runDir, artifact.path) ?? artifact.path,
       present: filePresent(runDir, artifact),
       contract: artifact.contract,
     })),
     outputs: stage.outputs.map((artifact) => ({
-      path: resolveArtifact(runDir, artifact.path),
+      path: safeResolve(runDir, artifact.path) ?? artifact.path,
       present: filePresent(runDir, artifact),
     })),
   };
 }
 
-function gateBlocks(gate: HumanGate, manifest: RunManifest, briefMeta: BriefMeta | null): boolean {
-  if (manifest.gates[gate.id] === "passed") {
-    return false;
+function blocks(
+  gate: HumanGate,
+  manifest: RunManifest,
+  briefMeta: BriefMeta | null,
+  runDir: string,
+  pipeline: Pipeline,
+  verdict?: string,
+): boolean {
+  if (gate.id === "spec-approved" && specApprovalProblem(runDir, manifest)) {
+    return true;
   }
-  if (gate.required === "conditional") {
-    return (briefMeta?.openQuestions.length ?? 0) > 0;
-  }
-  return true;
+  const recorded = verdict ?? verdictFor(runDir, pipeline, gate);
+  return gateBlocks(gate, manifest.gates[gate.id], briefMeta, recorded);
 }
 
-function checkAttempts(stage: Stage, manifest: RunManifest, errors: string[]): void {
-  const attempts = manifest.attempts[stage.id];
-  if (attempts === undefined) {
+/** When attempts exceed retryLimit, move next to escalateTo if that id is a human gate. */
+function attemptStopAction(
+  pipeline: Pipeline,
+  runDir: string,
+  stage: Stage,
+  manifest: RunManifest,
+  errors: string[],
+): NextAction | null {
+  const reason = retryBlockReason(stage, manifest.attempts[stage.id]);
+  if (!reason) {
+    return null;
+  }
+  errors.push(reason);
+  const gate = stage.escalateTo ? pipeline.humanGates[stage.escalateTo] : undefined;
+  if (gate) {
+    return { kind: "gate", gate };
+  }
+  return stageAction(runDir, stage, reason);
+}
+
+function verdictFor(runDir: string, pipeline: Pipeline, gate: HumanGate): string | undefined {
+  if (!gate.whenVerdict) {
+    return undefined;
+  }
+  const stage = pipeline.stages.find((item) => item.id === gate.after);
+  if (!stage) {
+    return undefined;
+  }
+  const verdict = readVerdict(runDir, stage);
+  return verdict.length > 0 ? verdict : undefined;
+}
+
+function explainBlockedGate(gate: HumanGate, manifest: RunManifest, errors: string[]): void {
+  if (gate.required === "conditional" && !isKnownGateCondition(gate.condition)) {
+    errors.push(`gate ${gate.id} condition is not recognized (${gate.condition ?? "missing"}); failing closed`);
     return;
   }
-  if (!Number.isInteger(attempts) || attempts < 1) {
-    errors.push(`attempts.${stage.id} must be a positive integer`);
-    return;
-  }
-  if (attempts > stage.retryLimit) {
-    const escalate = stage.escalateTo ? ` Escalate to ${stage.escalateTo}.` : "";
-    errors.push(`${stage.id} attempts ${attempts} exceed retry limit ${stage.retryLimit}.${escalate}`);
+  if (gate.required === "conditional" && manifest.gates[gate.id] === "skipped") {
+    errors.push(`gate ${gate.id} cannot be skipped while open questions remain`);
   }
 }
 
@@ -310,8 +410,12 @@ function checkArtifactContents(
   errors: string[],
   ticketsChecked: { done: boolean },
 ): void {
-  const full = resolveArtifact(runDir, artifact.path);
+  const full = safeResolve(runDir, artifact.path);
   const rel = runRelative(artifact);
+  if (!full) {
+    errors.push(`${rel}: path must stay under the run directory`);
+    return;
+  }
   const text = fs.readFileSync(full, "utf8");
   if (text.trim().length === 0) {
     errors.push(`${rel}: file is empty`);
@@ -418,10 +522,32 @@ function readManifest(runDir: string, errors: string[]): RunManifest {
   return {
     featureId: typeof document.featureId === "string" ? document.featureId : undefined,
     title: typeof document.title === "string" ? document.title : undefined,
+    productRepo: optionalText(document.productRepo),
+    branch: optionalText(document.branch),
+    specApproval: readSpecApproval(document.specApproval, errors),
     sessions,
     gates,
     attempts,
   };
+}
+
+function readSpecApproval(value: unknown, errors: string[]): { sha256: string } | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value) || typeof value.sha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(value.sha256.trim())) {
+    errors.push("manifest specApproval.sha256 must be a sha256 hex digest");
+    return undefined;
+  }
+  return { sha256: value.sha256.trim().toLowerCase() };
+}
+
+function optionalText(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function readBriefMeta(pipeline: Pipeline, runDir: string, errors: string[]): BriefMeta | null {
@@ -430,7 +556,11 @@ function readBriefMeta(pipeline: Pipeline, runDir: string, errors: string[]): Br
   if (!artifact) {
     return null;
   }
-  const full = resolveArtifact(runDir, artifact.path);
+  const full = safeResolve(runDir, artifact.path);
+  if (!full) {
+    errors.push("brief.meta.yaml: path must stay under the run directory");
+    return { openQuestions: [], malformed: true };
+  }
   if (!fs.existsSync(full)) {
     return null;
   }
@@ -443,7 +573,8 @@ function readBriefMeta(pipeline: Pipeline, runDir: string, errors: string[]): Br
     return null;
   }
   if (!isRecord(document) || !Array.isArray(document.openQuestions) || document.openQuestions.some((item) => typeof item !== "string")) {
-    return { openQuestions: [] };
+    errors.push("brief.meta.yaml: openQuestions must be a list of strings");
+    return { openQuestions: [], malformed: true };
   }
   return { openQuestions: document.openQuestions };
 }
@@ -453,8 +584,8 @@ function readVerdict(runDir: string, stage: Stage): string {
   if (!artifact) {
     return "";
   }
-  const full = resolveArtifact(runDir, artifact.path);
-  if (!fs.existsSync(full)) {
+  const full = safeResolve(runDir, artifact.path);
+  if (!full || !fs.existsSync(full)) {
     return "";
   }
   const lines = fs.readFileSync(full, "utf8").split(/\r?\n/);
@@ -464,9 +595,14 @@ function readVerdict(runDir: string, stage: Stage): string {
   }
   for (const line of lines.slice(heading + 1)) {
     const trimmed = line.trim();
-    if (trimmed.length > 0) {
-      return trimmed;
+    if (trimmed.length === 0) {
+      continue;
     }
+    const match = /^(approve|send-back)$/i.exec(trimmed);
+    if (match) {
+      return match[1].toLowerCase();
+    }
+    return trimmed;
   }
   return "";
 }
@@ -476,16 +612,24 @@ function filePresent(runDir: string, artifact: Artifact): boolean {
 }
 
 function fileExists(runDir: string, artifact: Artifact): boolean {
-  const full = resolveArtifact(runDir, artifact.path);
-  return fs.existsSync(full) && fs.statSync(full).isFile();
+  const full = safeResolve(runDir, artifact.path);
+  return full !== null && fs.existsSync(full) && fs.statSync(full).isFile();
 }
 
 function inspectFile(runDir: string, artifact: Artifact): "missing" | "empty" | "ok" {
-  const full = resolveArtifact(runDir, artifact.path);
-  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) {
+  const full = safeResolve(runDir, artifact.path);
+  if (!full || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
     return "missing";
   }
   return fs.readFileSync(full, "utf8").trim().length === 0 ? "empty" : "ok";
+}
+
+function safeResolve(runDir: string, artifactPath: string): string | null {
+  try {
+    return resolveArtifact(runDir, artifactPath);
+  } catch {
+    return null;
+  }
 }
 
 function stageHasAnyFile(runDir: string, stage: Stage): boolean {

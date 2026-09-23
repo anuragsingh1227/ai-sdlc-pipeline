@@ -32,17 +32,21 @@ If a fact is not in an input file, the role treats it as unknown and either leav
 
 ## What the orchestrator is
 
-The orchestrator is `pipeline.yaml` plus `src/cli.ts`. It sequences stages. It does not:
+The orchestrator is `pipeline.yaml` plus `src/cli.ts`. It sequences stages. It does not choose the next stage by calling Confluence, Jira, GitHub, or GitLab. `confluence fetch` and `jira push` are separate commands. It does not open a merge request, and it does not merge.
+
+It also does not:
 
 - choose a model
 - rewrite a spec
 - decide that a send-back is "close enough"
-- call Confluence, Jira, GitHub, or GitLab
-- merge
 
 `pipeline status` walks the stages in `order`. A stage is complete when every output file exists, is non-empty, and (when the stage has a verdict) the verdict line is `approve`. Human gates sit between stages. A required gate with status `pending` is the next action even if a model could have continued.
 
-Retry limits are caps, not targets. `onSendBack` names the stage that must be repeated. `escalateTo` names the human gate a human should take over once the cap is hit. The CLI reports the cap; a human enforces it by refusing another automatic loop. Record attempts in the manifest when you want that visible:
+Retry limits are caps, not targets. `onSendBack` names the stage that must be repeated. `escalateTo` names the human gate a human should take over once the cap is hit. When `attempts` is greater than `retryLimit` and `escalateTo` is a human gate, `pipeline status` names that gate. The CLI does not mark the gate passed.
+
+When a human sets `spec-approved: passed`, they also record `specApproval.sha256` of `02-spec/feature-spec.md` (`sha256sum 02-spec/feature-spec.md`). If that file changes, or the spec critic verdict is `send-back`, the gate no longer counts as passed.
+
+Record attempts in the manifest when you want that visible:
 
 ```yaml
 attempts:
@@ -70,7 +74,7 @@ Gates:
 | `spec-approved` | Spec critic verdict is `approve` | Human accepts the spec before tickets or code |
 | `merge` | MR body is written | Human reviews CI and merges |
 
-`brief-questions` is conditional. An empty `openQuestions` list skips it. The other two gates are always required.
+`brief-questions` is conditional. Its `condition` is `brief.meta.openQuestions is non-empty`. An empty `openQuestions` list skips it. A malformed `openQuestions` value fails closed and blocks. Any other condition string is rejected by `pipeline check` and, if it is reached anyway, blocks the run. `spec-approved` carries `whenVerdict: approve`, so that gate applies when the critic's verdict line is `approve`. The other two gates are always required.
 
 ## Session separation
 
@@ -80,6 +84,8 @@ Gates:
 - `sessions.implementer` and `sessions.code-critic-release` must differ once a code review exists.
 
 The same person may run the orchestrator CLI between sessions. The same agent session may not play both sides of a pair. Code critic and release are one role: the critic writes the verdict, and after `approve` a release step (same role, still not the implementer) writes the MR body. That role still does not edit product code.
+
+Session ids in `manifest.yaml` are advisory. The CLI compares the recorded strings and rejects a match. It does not receive a signed session id from Grok, Claude, Codex, or Cursor, so a person can write down two different ids for one sitting. The check is there so the handoff is explicit, not so the tool can prove it.
 
 ## Where product patterns live
 

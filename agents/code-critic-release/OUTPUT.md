@@ -18,4 +18,4 @@ The first non-empty line under `## Verdict` is `approve` or `send-back`. Finding
 
 Headings: `## Summary`, `## Acceptance criteria`, `## Test plan`, `## Deploy`.
 
-Opening the remote MR is allowed when `GIT_HOST` and the product remote are already set up for the host you are running in. Record the URL in the summary. Merging is not an output.
+The CLI does not open the remote MR. Write the body and leave the URL as "not opened yet" until a human opens it. Record that URL in the summary when a human has one. Merging is not an output.
