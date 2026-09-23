@@ -28,14 +28,14 @@ File: `runs/<feature-id>/04-jira/tickets.yaml`
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `project` | yes | From `JIRA_PROJECT_KEY` or the human. Example: `OPS` |
+| `project` | yes | Must equal `JIRA_PROJECT_KEY` when that variable is set. Example: `OPS` |
 | `epic.issueType` | yes | `Epic` |
 | `epic.summary` | yes | Feature name, not a task list |
 | `stories[].issueType` | yes | `Story` unless the human asked for `Task` |
 | `stories[].summary` | yes | Imperative, specific |
 | `stories[].description` | yes | Spec trace: which behavior section |
 | `stories[].acceptanceCriteria` | yes | The Given/When/Then for that story |
-| `stories[].parent` | yes | `epic` until a real key exists |
+| `stories[].parent` | yes | `epic` links the story to the epic in this file. A Jira issue key (for example `OPS-10`) is sent as `parent` unchanged. |
 | `stories[].labels` | no | Include the feature id |
 | `stories[].components` | no | Product components, such as `order-api` or `order-console` |
 | `stories[].storyPoints` | no | Leave unset. Humans estimate |
@@ -50,7 +50,9 @@ npx tsx src/cli.ts jira push --run runs/<feature-id> --mock
 npx tsx src/cli.ts jira push --run runs/<feature-id> --apply
 ```
 
-Dry-run is the default. `--mock` reads `examples/fixtures/jira-create-response.json`, writes `04-jira/push-result.json`, and stores keys back into `tickets.yaml`. `--apply` calls Jira Cloud `POST /rest/api/3/issue` (or `PUT` when a story already has a `key`). The epic is created first. Story descriptions are Atlassian document format built from the Given/When/Then text. Auth is Basic `JIRA_EMAIL`:`JIRA_API_TOKEN`. The token is not written into the URL or the JSON body.
+Dry-run is the default. `--mock` reads `examples/fixtures/jira-create-response.json`, writes `04-jira/push-result.json`, and stores keys back into `tickets.yaml`. `--apply` calls Jira Cloud `POST /rest/api/3/issue` (or `PUT` when a story already has a `key`). The epic is created first. A story whose `parent` is `epic` is filed under that epic key. Story descriptions are Atlassian document format built from the Given/When/Then text. Auth is Basic `JIRA_EMAIL`:`JIRA_API_TOKEN`. The token is not written into the URL or the JSON body. `JIRA_BASE_URL` must be `https`. The host must be `*.atlassian.net` or the exact configured host. Redirects to any other host, including link-local and metadata addresses, are refused.
+
+`jira push` will not write into `examples/` unless you pass `--force`. Copy the run under `runs/` before a mock or live push.
 
 Without credentials, `--apply` fails and names `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_PROJECT_KEY`.
 

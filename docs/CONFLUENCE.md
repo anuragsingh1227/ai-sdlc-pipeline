@@ -19,7 +19,7 @@ Live Confluence Cloud (`GET /wiki/rest/api/content/{id}?expand=body.storage`):
 npx tsx src/cli.ts confluence fetch --page 1042 --out runs/<feature-id>/00-source
 ```
 
-Auth is HTTP Basic, `CONFLUENCE_EMAIL`:`CONFLUENCE_API_TOKEN`. The client turns storage HTML into markdown and writes `00-source/page.md`. A page URL such as `https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Title` is accepted. The token is never placed in the URL.
+Auth is HTTP Basic, `CONFLUENCE_EMAIL`:`CONFLUENCE_API_TOKEN`. The client turns storage HTML into markdown and writes `00-source/page.md`. `--out` must be a relative path under `runs/` (for example `runs/<feature-id>/00-source`). Absolute paths and `..` are rejected. A page URL such as `https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Title` is accepted. `CONFLUENCE_BASE_URL` must be `https`. The host must be `*.atlassian.net` or the exact configured host. Redirects off that allowlist, and link-local or metadata hosts, are refused. The token is never placed in the URL.
 
 Without credentials and without `--mock` / `PIPELINE_MOCK_ATLASSIAN=1`, the command fails and names the missing variables.
 

@@ -1,33 +1,82 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { retryBlockReason } from "./gates.js";
+import { DRAFT_LINE, assessRun, formatStatus, loadManifest, resolveArtifact } from "./run.js";
+import { resolveRepoPath } from "./paths.js";
 import type { Pipeline, Stage } from "./types.js";
-import { DRAFT_LINE, assessRun, formatStatus, resolveArtifact } from "./run.js";
+import { leakedSecretNames, scrubWorkerEnv } from "./worker-env.js";
 
 export type WorkerName = "none" | "grok" | "claude" | "codex";
+
+/** Hard stop so a hung coding CLI cannot hold the pipeline open. */
+export const DEFAULT_WORKER_TIMEOUT_MS = 15 * 60 * 1000;
+
+export interface WorkerCommand {
+  command: string;
+  args: string[];
+  /** When set, the task file is the process stdin. The prompt text is never an argv entry. */
+  stdinFile?: string;
+}
+
+export interface WorkerSpawnRequest {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  stdinFile?: string;
+}
+
+export interface SpawnResult {
+  status: number | null;
+  timedOut?: boolean;
+  signal?: string;
+}
 
 export interface RunRequest {
   dryRun: boolean;
   worker: WorkerName;
   to?: string;
+  workerTimeoutMs?: number;
   commandExists?: (command: string) => boolean;
-  spawnWorker?: (command: string, args: string[], cwd: string) => { status: number | null };
+  spawnWorker?: (request: WorkerSpawnRequest) => SpawnResult;
 }
 
-export function workerArgv(worker: Exclude<WorkerName, "none">, taskFile: string, prompt: string): { command: string; args: string[] } {
+export function workerArgv(worker: Exclude<WorkerName, "none">, taskFile: string): WorkerCommand {
   switch (worker) {
     case "grok":
       return { command: "grok", args: ["-p", "--prompt-file", taskFile] };
     case "claude":
-      return { command: "claude", args: ["-p", prompt] };
+      // The task file is an argument. The positional line is a fixed instruction, not the task body.
+      // Stdin carries the same file for Claude Code builds that read the print-mode prompt from stdin.
+      return {
+        command: "claude",
+        args: [
+          "-p",
+          "--append-system-prompt-file",
+          taskFile,
+          "Follow the stage task in the appended prompt file. Write only the listed outputs.",
+        ],
+        stdinFile: taskFile,
+      };
     case "codex":
-      return { command: "codex", args: ["exec", prompt] };
+      // `codex exec -` reads the full prompt from stdin.
+      return { command: "codex", args: ["exec", "-"], stdinFile: taskFile };
   }
 }
 
 export function commandOnPath(command: string): boolean {
   const result = spawnSync("which", [command], { encoding: "utf8" });
   return result.status === 0;
+}
+
+/** A signal, launch error, or null status is a failed run. Timeout is non-zero. */
+export function normalizeWorkerStatus(result: Pick<SpawnSyncReturns<string>, "status" | "signal" | "error">): number {
+  if (result.signal || result.error || result.status === null) {
+    return 1;
+  }
+  return result.status;
 }
 
 /**
@@ -59,6 +108,12 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
     }
   }
 
+  const attempts = loadManifest(runDir).manifest.attempts[stage.id];
+  const retryStop = retryBlockReason(stage, attempts);
+  if (retryStop) {
+    return { code: 1, report: retryStop };
+  }
+
   const lines = [
     `Next stage: ${stage.id} (${stage.label})`,
     `Role: ${stage.role}`,
@@ -68,7 +123,12 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
   ];
 
   for (const artifact of stage.outputs) {
-    const destination = resolveArtifact(runDir, artifact.path);
+    let destination: string;
+    try {
+      destination = resolveArtifact(runDir, artifact.path);
+    } catch (error) {
+      return { code: 1, report: error instanceof Error ? error.message : String(error) };
+    }
     if (fs.existsSync(destination)) {
       lines.push(`Keep: ${display(destination)}`);
       continue;
@@ -77,7 +137,12 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
       lines.push(`Needs author: ${display(destination)} (no template)`);
       continue;
     }
-    const templatePath = path.join(pipeline.rootDir, artifact.template);
+    let templatePath: string;
+    try {
+      templatePath = resolveRepoPath(pipeline.rootDir, artifact.template, "template");
+    } catch (error) {
+      return { code: 1, report: error instanceof Error ? error.message : String(error) };
+    }
     lines.push(`Template: ${artifact.template} -> ${display(destination)}`);
     if (!request.dryRun) {
       fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -86,16 +151,32 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
     }
   }
 
-  const taskFile = path.join(runDir, ".pipeline", "task.md");
-  const prompt = buildTaskPrompt(pipeline, runDir, stage);
+  const runRoot = path.resolve(runDir);
+  const taskFile = path.join(runRoot, ".pipeline", "task.md");
+  let prompt: string;
+  try {
+    prompt = buildTaskPrompt(pipeline, runDir, stage);
+  } catch (error) {
+    return { code: 1, report: error instanceof Error ? error.message : String(error) };
+  }
+  const leaked = leakedSecretNames(prompt);
+  if (leaked.length > 0) {
+    return {
+      code: 1,
+      report: `Refusing to write the task prompt because it contains secret env values: ${leaked.join(", ")}`,
+    };
+  }
   if (request.worker === "none") {
     lines.push("Worker none: templates prepared where missing. Draft files fail validate until a worker replaces them.");
     lines.push("Coding still happens in the product repo. This process does not call a model.");
     return { code: 0, report: lines.join("\n") };
   }
 
-  const argv = workerArgv(request.worker, taskFile, prompt);
-  lines.push(`Command: ${argv.command} ${describeArgs(argv.args, taskFile, prompt)}`);
+  const argv = workerArgv(request.worker, taskFile);
+  if (argv.args.some((arg) => arg === prompt)) {
+    return { code: 1, report: "Refusing to pass the task prompt on the worker command line." };
+  }
+  lines.push(`Command: ${describeCommand(argv)}`);
   if (request.dryRun) {
     lines.push(`Would write task: ${display(taskFile)}`);
     return { code: 0, report: lines.join("\n") };
@@ -108,10 +189,21 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
   }
   fs.mkdirSync(path.dirname(taskFile), { recursive: true });
   fs.writeFileSync(taskFile, prompt);
-  const spawnWorker = request.spawnWorker ?? defaultSpawn;
-  const result = spawnWorker(argv.command, argv.args, pipeline.rootDir);
+  const timeoutMs = request.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
+  const spawnWorker = request.spawnWorker ?? spawnWorkerProcess;
+  const result = spawnWorker({
+    command: argv.command,
+    args: argv.args,
+    cwd: runRoot,
+    env: scrubWorkerEnv(process.env),
+    timeoutMs,
+    stdinFile: argv.stdinFile,
+  });
   if (result.status !== 0) {
-    lines.push(`Error: ${argv.command} exited ${result.status ?? "with a launch error"}.`);
+    const why = result.timedOut
+      ? `timed out after ${timeoutMs}ms and was killed`
+      : `exited ${result.status ?? "with a launch error"}${result.signal ? ` (${result.signal})` : ""}`;
+    lines.push(`Error: ${argv.command} ${why}.`);
     return { code: 1, report: lines.join("\n") };
   }
   lines.push(`Worker ${argv.command} exited 0. Re-run pipeline validate --run before the next stage.`);
@@ -148,13 +240,27 @@ export function buildTaskPrompt(pipeline: Pipeline, runDir: string, stage: Stage
   ].join("\n");
 }
 
-function describeArgs(args: string[], taskFile: string, prompt: string): string {
-  return args.map((arg) => (arg === prompt ? `@${taskFile}` : arg)).join(" ");
+export function spawnWorkerProcess(request: WorkerSpawnRequest): SpawnResult {
+  const input = request.stdinFile ? fs.readFileSync(request.stdinFile) : undefined;
+  const result = spawnSync(request.command, request.args, {
+    cwd: request.cwd,
+    env: request.env,
+    timeout: request.timeoutMs,
+    killSignal: "SIGKILL",
+    stdio: input ? ["pipe", "inherit", "inherit"] : "inherit",
+    input,
+  });
+  const timedOut = Boolean(result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
+  return {
+    status: normalizeWorkerStatus(result),
+    timedOut,
+    signal: result.signal ?? undefined,
+  };
 }
 
-function defaultSpawn(command: string, args: string[], cwd: string): { status: number | null } {
-  const result = spawnSync(command, args, { cwd, stdio: "inherit" });
-  return { status: result.status };
+function describeCommand(argv: WorkerCommand): string {
+  const rendered = [argv.command, ...argv.args].join(" ");
+  return argv.stdinFile ? `${rendered} < ${argv.stdinFile}` : rendered;
 }
 
 function display(filePath: string): string {

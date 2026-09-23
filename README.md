@@ -104,7 +104,7 @@ npm test
 npm run typecheck
 
 # Recorded Confluence page -> markdown export
-npx tsx src/cli.ts confluence fetch --page 1042 --out /tmp/order-explain/00-source --mock
+npx tsx src/cli.ts confluence fetch --page 1042 --out runs/order-explain/00-source --mock
 
 # Sample is already at the merge gate. Dry-run stops there and writes nothing.
 npx tsx src/cli.ts run --run examples/sample-run --dry-run
@@ -132,10 +132,10 @@ npx tsx src/cli.ts jira push --run runs/my-feature --apply
 | Worker | Argv |
 | --- | --- |
 | grok | `grok -p --prompt-file <run>/.pipeline/task.md` |
-| claude | `claude -p <task text>` |
-| codex | `codex exec <task text>` |
+| claude | `claude -p --append-system-prompt-file <run>/.pipeline/task.md` (task also on stdin) |
+| codex | `codex exec -` with `<run>/.pipeline/task.md` on stdin |
 
-The task file contains that stage's `SYSTEM.md`, skill, and artifact paths. Default `--worker none` only copies a template and marks it `pipeline-draft`, which `validate` rejects until a worker replaces it.
+The task file contains that stage's `SYSTEM.md`, skill, and artifact paths. The prompt is not passed on the command line. The worker's working directory is the run directory, and token, password, and secret variables are removed from its environment. Default `--worker none` only copies a template and marks it `pipeline-draft`, which `validate` rejects until a worker replaces it.
 
 What you still do outside this repo:
 

@@ -74,6 +74,8 @@ export interface RunManifest {
 
 export interface BriefMeta {
   openQuestions: string[];
+  /** Set when `openQuestions` is missing or not a list of strings. Conditional gates fail closed. */
+  malformed?: boolean;
 }
 
 export type NextAction =

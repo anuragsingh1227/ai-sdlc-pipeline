@@ -70,7 +70,7 @@ Gates:
 | `spec-approved` | Spec critic verdict is `approve` | Human accepts the spec before tickets or code |
 | `merge` | MR body is written | Human reviews CI and merges |
 
-`brief-questions` is conditional. An empty `openQuestions` list skips it. The other two gates are always required.
+`brief-questions` is conditional. Its `condition` is `brief.meta.openQuestions is non-empty`. An empty `openQuestions` list skips it. A malformed `openQuestions` value fails closed and blocks. Any other condition string is rejected by `pipeline check` and, if it is reached anyway, blocks the run. `spec-approved` carries `whenVerdict: approve`, so that gate applies when the critic's verdict line is `approve`. The other two gates are always required.
 
 ## Session separation
 
@@ -80,6 +80,8 @@ Gates:
 - `sessions.implementer` and `sessions.code-critic-release` must differ once a code review exists.
 
 The same person may run the orchestrator CLI between sessions. The same agent session may not play both sides of a pair. Code critic and release are one role: the critic writes the verdict, and after `approve` a release step (same role, still not the implementer) writes the MR body. That role still does not edit product code.
+
+Session ids in `manifest.yaml` are advisory. The CLI compares the recorded strings and rejects a match. It does not receive a signed session id from Grok, Claude, Codex, or Cursor, so a person can write down two different ids for one sitting. The check is there so the handoff is explicit, not so the tool can prove it.
 
 ## Where product patterns live
 

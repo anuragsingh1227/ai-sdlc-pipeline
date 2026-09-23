@@ -29,13 +29,14 @@ test("page ids and Confluence URLs parse", () => {
   assert.equal(parsed.baseUrlFromUrl, "https://example.atlassian.net/wiki");
 });
 
-test("mock confluence fetch writes page.md without network", async () => {
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), "confluence-out-"));
+test("mock confluence fetch writes page.md under runs/ without network", async () => {
+  const outRel = path.join("runs", `confluence-out-${process.pid}-${Date.now()}`);
+  const out = path.join(repoRoot, outRel);
   const previous = process.cwd();
   process.chdir(repoRoot);
   try {
     const code = await main(
-      ["confluence", "fetch", "--page", "1042", "--out", out, "--mock"],
+      ["confluence", "fetch", "--page", "1042", "--out", outRel, "--mock"],
       () => undefined,
       () => undefined,
     );
@@ -45,6 +46,7 @@ test("mock confluence fetch writes page.md without network", async () => {
     assert.match(page, /ORDER_READ/);
     assert.match(page, /Page id: 1042/);
   } finally {
+    fs.rmSync(out, { recursive: true, force: true });
     process.chdir(previous);
   }
 });

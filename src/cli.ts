@@ -4,6 +4,7 @@ import path from "node:path";
 import { getPage, writeConfluenceExport } from "../integrations/confluence.js";
 import { createIssuesFromTicketsYaml } from "../integrations/jira.js";
 import { loadLocalEnv, readAtlassianEnv } from "./env.js";
+import { assertUnderRuns } from "./paths.js";
 import { loadPipeline } from "./pipeline.js";
 import { assessRun, formatStatus } from "./run.js";
 import { runNextStage, type WorkerName } from "./runner.js";
@@ -17,20 +18,24 @@ Usage:
   pipeline check [--file pipeline.yaml]
   pipeline validate [--file pipeline.yaml] [--run <dir>]
   pipeline status [<feature-id>] [--root runs] [--run <dir>] [--file pipeline.yaml]
-  pipeline run --run <dir> [--to <stage>] [--dry-run] [--worker grok|claude|codex|none]
-  pipeline confluence fetch --page <id|url> --out <dir> [--mock]
-  pipeline jira push --run <dir> [--dry-run] [--mock] [--apply]
+  pipeline run [--file pipeline.yaml] --run <dir> [--to <stage>] [--dry-run] [--worker grok|claude|codex|none]
+  pipeline confluence fetch --page <id|url> --out runs/<feature-id>/00-source [--mock]
+  pipeline jira push --run <dir> [--dry-run] [--mock] [--apply] [--force]
 
 check verifies the repo scaffold. validate also checks a run when --run is set.
 status prints the next stage or human gate.
 
 run prepares the next stage's missing templates and stops at a human gate.
+--file selects the phase graph (default pipeline.yaml) for check, validate, status, and run.
 --dry-run prints the actions and does not write or launch a worker.
 --worker defaults to none (no model CLI). grok, claude, and codex are optional shells.
+Workers read a prompt file (or that file on stdin). The prompt is not placed on argv.
+Spawned workers do not inherit *_TOKEN, *_PASSWORD, or similar secrets, and their cwd is the run directory.
 
-confluence fetch writes 00-source/page.md. jira push reads 04-jira/tickets.yaml.
+confluence fetch writes 00-source/page.md. --out must be a relative path under runs/.
+jira push reads 04-jira/tickets.yaml. It refuses to modify examples/ unless --force.
 Both stay offline with --mock or PIPELINE_MOCK_ATLASSIAN=1. jira push dry-runs unless --apply or --mock.
-Live calls need the variables in .env.example. Do not commit tokens.
+Live calls need the variables in .env.example. Base URLs must be https. Do not commit tokens.
 `;
 
 interface Args {
@@ -47,6 +52,7 @@ interface Args {
   mock: boolean;
   dryRun: boolean;
   apply: boolean;
+  force: boolean;
   worker: WorkerName;
 }
 
@@ -80,7 +86,7 @@ export async function main(
     return jiraCommand(args, rootDir, stdout, stderr);
   }
   if (args.command === "run") {
-    return runCommand(args, rootDir, stdout, stderr);
+    return runCommand(args, stdout, stderr);
   }
 
   if (args.command !== "validate" && args.command !== "status" && args.command !== "check") {
@@ -140,6 +146,10 @@ export async function main(
 
   const root = path.resolve(args.root ?? loaded.pipeline.artifactRoot);
   if (args.featureId) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.featureId)) {
+      stderr("feature id must be a single directory name");
+      return 2;
+    }
     return printOne(loaded.pipeline, path.join(root, args.featureId), stdout, stderr);
   }
 
@@ -180,6 +190,13 @@ async function confluenceCommand(
     stderr("confluence fetch needs --page and --out");
     return 2;
   }
+  let outDir: string;
+  try {
+    outDir = assertUnderRuns(rootDir, args.out);
+  } catch (error) {
+    stderr(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
   const env = readAtlassianEnv();
   try {
     const page = await getPage(args.page, {
@@ -187,7 +204,7 @@ async function confluenceCommand(
       env,
       fixturePath: path.join(rootDir, "examples/fixtures/confluence-page.json"),
     });
-    const written = await writeConfluenceExport(page, args.out);
+    const written = await writeConfluenceExport(page, outDir);
     stdout(`Wrote ${display(written)} (${args.mock || env.mock ? "mock" : "live"}, page ${page.id})`);
     return 0;
   } catch (error) {
@@ -203,7 +220,7 @@ async function jiraCommand(
   stderr: (line: string) => void,
 ): Promise<number> {
   if (args.subcommand !== "push") {
-    stderr("Usage: pipeline jira push --run <dir> [--dry-run] [--mock] [--apply]");
+    stderr("Usage: pipeline jira push --run <dir> [--dry-run] [--mock] [--apply] [--force]");
     return 2;
   }
   if (!args.run) {
@@ -223,6 +240,8 @@ async function jiraCommand(
       mock,
       dryRun,
       apply: args.apply,
+      force: args.force,
+      repoRoot: rootDir,
       env,
       fixturePath: path.join(rootDir, "examples/fixtures/jira-create-response.json"),
     });
@@ -248,7 +267,6 @@ async function jiraCommand(
 
 function runCommand(
   args: Args,
-  rootDir: string,
   stdout: (line: string) => void,
   stderr: (line: string) => void,
 ): number {
@@ -256,7 +274,7 @@ function runCommand(
     stderr("pipeline run needs --run <dir>");
     return 2;
   }
-  const loaded = loadPipeline(path.join(rootDir, "pipeline.yaml"));
+  const loaded = loadPipeline(args.file);
   if (!loaded.pipeline) {
     for (const error of loaded.errors) {
       stderr(`- ${error}`);
@@ -308,6 +326,7 @@ export function parseArgs(argv: string[]): Args {
     mock: false,
     dryRun: false,
     apply: false,
+    force: false,
     worker: "none",
   };
   for (let index = 0; index < rest.length; index += 1) {
@@ -328,6 +347,10 @@ export function parseArgs(argv: string[]): Args {
       args.apply = true;
       continue;
     }
+    if (token === "--force") {
+      args.force = true;
+      continue;
+    }
     if (token === "--file" || token === "--root" || token === "--run" || token === "--page" || token === "--out" || token === "--to" || token === "--worker") {
       const value = rest[index + 1];
       if (!value || value.startsWith("--")) {
@@ -336,9 +359,15 @@ export function parseArgs(argv: string[]): Args {
       index += 1;
       if (token === "--file") args.file = value;
       else if (token === "--root") args.root = value;
-      else if (token === "--run") args.run = value;
+      else if (token === "--run") {
+        rejectDotDot(value, "--run");
+        args.run = value;
+      }
       else if (token === "--page") args.page = value;
-      else if (token === "--out") args.out = value;
+      else if (token === "--out") {
+        rejectDotDot(value, "--out");
+        args.out = value;
+      }
       else if (token === "--to") args.to = value;
       else args.worker = parseWorker(value);
       continue;
@@ -358,6 +387,12 @@ export function parseArgs(argv: string[]): Args {
     throw new Error("Pass only one of --apply or --dry-run");
   }
   return args;
+}
+
+function rejectDotDot(value: string, label: string): void {
+  if (value.split(/[\\/]/).includes("..")) {
+    throw new Error(`${label} must not contain '..'`);
+  }
 }
 
 function parseWorker(value: string): WorkerName {

@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
+import { assertAtlassianRequestUrl, assertConfiguredBaseUrl, fetchAtlassian } from "../src/atlassian-url.js";
 import { basicAuthHeader, siteBaseUrl, type AtlassianEnv } from "../src/env.js";
+import { isUnderExamples } from "../src/paths.js";
 
 export interface JiraIssuePlan {
   key?: string;
@@ -27,6 +29,10 @@ export interface JiraClientOptions {
   env?: AtlassianEnv;
   fetchImpl?: typeof fetch;
   fixturePath?: string;
+  /** Write keys back into a run under examples/. Off by default. */
+  force?: boolean;
+  /** Repo root used to detect examples/. Defaults to the process working directory. */
+  repoRoot?: string;
 }
 
 interface TicketFile {
@@ -37,6 +43,8 @@ interface TicketFile {
 
 const MISSING_CREDENTIALS =
   "Jira credentials are not set. Export JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, and JIRA_PROJECT_KEY, or pass --mock / set PIPELINE_MOCK_ATLASSIAN=1.";
+
+const JIRA_ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 
 export function plainTextToAdf(text: string): { type: "doc"; version: 1; content: unknown[] } {
   const lines = text.split(/\r?\n/).map((line) => line.trimEnd());
@@ -75,17 +83,40 @@ export function buildCreatePayload(input: {
   return { fields };
 }
 
+/**
+ * `parent: epic` means the epic in this tickets file (its key, once created).
+ * Any other value must already be a Jira issue key.
+ */
+export function resolveStoryParent(parent: string, epicKey: string | undefined): string | undefined {
+  const trimmed = parent.trim();
+  if (trimmed.length === 0 || trimmed === "epic") {
+    return epicKey;
+  }
+  if (!JIRA_ISSUE_KEY.test(trimmed)) {
+    throw new Error(`story parent must be "epic" or a Jira issue key, found "${trimmed}"`);
+  }
+  return trimmed;
+}
+
 export async function createIssuesFromTicketsYaml(
   ticketsPath: string,
   options: JiraClientOptions = {},
 ): Promise<JiraPushResult> {
   const absolute = path.resolve(ticketsPath);
   const tickets = readTickets(absolute);
-  const project = options.env?.jiraProjectKey || tickets.project;
+  assertStoryParents(tickets.stories);
+  if (options.env?.jiraProjectKey && options.env.jiraProjectKey !== tickets.project) {
+    throw new Error(
+      `tickets.project "${tickets.project}" does not match JIRA_PROJECT_KEY "${options.env.jiraProjectKey}"`,
+    );
+  }
+  const project = tickets.project;
   const mode = resolveMode(options);
   if (mode === "live") {
     assertJiraEnv(options.env);
+    assertConfiguredBaseUrl(options.env?.jiraBaseUrl ?? "");
   }
+  assertExamplesWritable(absolute, options, mode);
 
   const epicDescription = stringField(tickets.epic.description) || tickets.epic.summary || "Epic";
   const epicPlan: JiraIssuePlan = {
@@ -141,10 +172,15 @@ export async function createIssuesFromTicketsYaml(
     throw new Error(MISSING_CREDENTIALS);
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const base = siteBaseUrl(env.jiraBaseUrl);
-  epicPlan.key = await upsertIssue(base, env, fetchImpl, project, epicPlan);
-  for (const story of storyPlans) {
-    story.key = await upsertIssue(base, env, fetchImpl, project, story, epicPlan.key);
+  const configured = assertConfiguredBaseUrl(env.jiraBaseUrl);
+  const host = configured.hostname.toLowerCase();
+  const base = siteBaseUrl(configured.toString());
+  epicPlan.key = await upsertIssue(base, host, env, fetchImpl, project, epicPlan);
+  for (let index = 0; index < storyPlans.length; index += 1) {
+    const story = storyPlans[index];
+    const source = tickets.stories[index];
+    const parentKey = resolveStoryParent(stringField(source?.parent), epicPlan.key);
+    story.key = await upsertIssue(base, host, env, fetchImpl, project, story, parentKey);
   }
   const result: JiraPushResult = {
     mode: "live",
@@ -191,6 +227,7 @@ function assertJiraEnv(env: AtlassianEnv | undefined): void {
 
 async function upsertIssue(
   base: string,
+  configuredHost: string,
   env: AtlassianEnv,
   fetchImpl: typeof fetch,
   project: string,
@@ -207,7 +244,10 @@ async function upsertIssue(
   });
   const token = env.jiraToken ?? "";
   const existing = issue.key;
-  const url = existing ? `${base}/rest/api/3/issue/${encodeURIComponent(existing)}` : `${base}/rest/api/3/issue`;
+  const url = assertAtlassianRequestUrl(
+    existing ? `${base}/rest/api/3/issue/${encodeURIComponent(existing)}` : `${base}/rest/api/3/issue`,
+    configuredHost,
+  );
   const fields = payload.fields as Record<string, unknown>;
   const bodyDocument = existing
     ? { fields: { summary: fields.summary, description: fields.description } }
@@ -216,15 +256,20 @@ async function upsertIssue(
   if (url.includes(token) || serialized.includes(token)) {
     throw new Error("Refusing to send the Jira API token in the URL or body.");
   }
-  const response = await fetchImpl(url, {
-    method: existing ? "PUT" : "POST",
-    headers: {
-      Authorization: basicAuthHeader(env.jiraEmail ?? "", token),
-      Accept: "application/json",
-      "Content-Type": "application/json",
+  const response = await fetchAtlassian(
+    url,
+    {
+      method: existing ? "PUT" : "POST",
+      headers: {
+        Authorization: basicAuthHeader(env.jiraEmail ?? "", token),
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: serialized,
     },
-    body: serialized,
-  });
+    fetchImpl,
+    configuredHost,
+  );
   const body = await response.text();
   if (!response.ok) {
     throw new Error(`Jira ${existing ? "PUT" : "POST"} /rest/api/3/issue failed: HTTP ${response.status} ${clip(body)}`);
@@ -237,6 +282,25 @@ async function upsertIssue(
     throw new Error("Jira create response did not include an issue key.");
   }
   return created.key;
+}
+
+function assertStoryParents(stories: Array<Record<string, unknown>>): void {
+  stories.forEach((story, index) => {
+    const parent = stringField(story.parent).trim();
+    if (parent !== "epic" && !JIRA_ISSUE_KEY.test(parent)) {
+      throw new Error(`story ${index + 1} parent must be "epic" or a Jira issue key, found "${parent || "(empty)"}"`);
+    }
+  });
+}
+
+function assertExamplesWritable(ticketsPath: string, options: JiraClientOptions, mode: "dry-run" | "mock" | "live"): void {
+  if (mode === "dry-run" || options.force) {
+    return;
+  }
+  const repoRoot = options.repoRoot ?? process.cwd();
+  if (isUnderExamples(repoRoot, ticketsPath)) {
+    throw new Error("Refusing to modify examples/. Copy the run out of examples/ or pass --force.");
+  }
 }
 
 function readTickets(filePath: string): TicketFile {

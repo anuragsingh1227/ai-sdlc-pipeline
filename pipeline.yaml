@@ -12,6 +12,7 @@ orchestrator:
 
 # Critics are different roles from the authors they review.
 # A run manifest must record different session ids for each pair.
+# Those ids are advisory: validate compares the strings and cannot see the host session.
 separation:
   specCriticMustDifferFrom: spec-writer
   codeCriticMustDifferFrom: implementer

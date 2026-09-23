@@ -34,8 +34,8 @@ Walk stages by `order`:
 - If an output file is missing or empty, that stage is next. Print its role, skill, inputs, and outputs.
 - If the stage expects a verdict and the verdict is `send-back`, the next stage is `onSendBack` (the writer or the implementer), not the following stage.
 - If the verdict is `approve`, look at the human gate whose `after` is this stage.
-  - `brief-questions` blocks only when `01-brief/brief.meta.yaml` has a non-empty `openQuestions` list and the gate is not `passed`.
-  - `spec-approved` always blocks until the manifest says `passed`.
+  - `brief-questions` blocks only when its condition holds and the gate is not `passed`. The supported condition is `brief.meta.openQuestions is non-empty`. An unknown condition fails closed (the gate blocks). A malformed `openQuestions` value also blocks.
+  - `spec-approved` blocks until the manifest says `passed` when the critic verdict is `approve` (`whenVerdict`). A different verdict does not open that gate.
   - `merge` always blocks until a human sets it to `passed`. There is no stage after it.
 
 With `--worker none` (the default) the CLI only prepares files. With `--worker grok`, `claude`, or `codex` it shells out to that binary for the current stage, using the argv in [`docs/HOSTS.md`](../docs/HOSTS.md). A missing binary is an error. Grok Build teammates can still follow `pipeline status` by hand and skip `--worker`.
@@ -55,11 +55,11 @@ Allowed values are `passed`, `pending`, and `skipped`. `skipped` is valid only f
 
 ## Retry limits
 
-Each automated stage has `retryLimit`. A send-back consumes an attempt. Record counts under `attempts` in the manifest if you want them visible. When the count would exceed the limit, stop the loop and take the `escalateTo` gate to a human (`spec-approved` or `merge`). The CLI prints the limit on the next-stage block; it does not auto-escalate, because it does not invent gate decisions.
+Each automated stage has `retryLimit`. A send-back consumes an attempt. Record counts under `attempts` in the manifest if you want them visible. When `attempts` is greater than `retryLimit`, `pipeline run` refuses to prepare that stage and names `escalateTo` (or a human, when the stage has no escalate target). The CLI does not mark the gate passed. A human has to take that gate.
 
 ## Separation checks
 
-When `03-spec-critic/verdict.md` exists, `sessions.spec-writer` and `sessions.spec-critic` must both be set and must differ. When `06-code-critic/review.md` exists, `sessions.implementer` and `sessions.code-critic-release` must differ. Matching ids fail `validate`.
+When `03-spec-critic/verdict.md` exists, `sessions.spec-writer` and `sessions.spec-critic` must both be set and must differ. When `06-code-critic/review.md` exists, `sessions.implementer` and `sessions.code-critic-release` must differ. Matching ids fail `validate`. The ids are advisory: validate compares the manifest strings and cannot see the host session.
 
 ## Out of scope for the orchestrator
 

@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
+import { isKnownGateCondition } from "./gates.js";
+import { isSafeArtifactPath, isSafeRelative } from "./paths.js";
 import type { Artifact, HumanGate, Pipeline, Role, Stage } from "./types.js";
 
 const REQUIRED_STAGE_IDS = [
@@ -161,8 +163,12 @@ function parseGates(value: unknown, errors: string[]): Record<string, HumanGate>
     if (required === null) {
       continue;
     }
-    if (required === "conditional" && typeof raw.condition !== "string") {
-      errors.push(`human gate ${id} is conditional and needs a condition`);
+    if (required === "conditional" && !isKnownGateCondition(typeof raw.condition === "string" ? raw.condition : undefined)) {
+      const shown = typeof raw.condition === "string" && raw.condition.length > 0 ? raw.condition : "missing";
+      errors.push(`human gate ${id} condition is not supported (${shown})`);
+    }
+    if (raw.whenVerdict !== undefined && raw.whenVerdict !== "approve" && raw.whenVerdict !== "send-back") {
+      errors.push(`human gate ${id} whenVerdict must be approve or send-back`);
     }
     gates[id] = {
       id,
@@ -312,10 +318,16 @@ function checkGraph(pipeline: Pipeline, errors: string[]): void {
       errors.push(`stage ${stage.id} skill not found: ${stage.skill}`);
     }
     for (const artifact of [...stage.inputs, ...stage.outputs]) {
-      if (!artifact.path.includes("{run}/")) {
-        errors.push(`stage ${stage.id} artifact ${artifact.name} path must start with {run}/`);
+      if (!isSafeArtifactPath(artifact.path)) {
+        errors.push(
+          `stage ${stage.id} artifact ${artifact.name} path must stay under {run}/ without '..' or an absolute path`,
+        );
       }
       if (artifact.template) {
+        if (!isSafeRelative(artifact.template)) {
+          errors.push(`stage ${stage.id} template must stay inside the repo without '..': ${artifact.template}`);
+          continue;
+        }
         const templatePath = path.join(pipeline.rootDir, artifact.template);
         if (!fs.existsSync(templatePath)) {
           errors.push(`stage ${stage.id} template not found: ${artifact.template}`);

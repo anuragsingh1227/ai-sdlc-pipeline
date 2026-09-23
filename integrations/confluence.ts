@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { assertAtlassianRequestUrl, assertConfiguredBaseUrl, fetchAtlassian } from "../src/atlassian-url.js";
 import { basicAuthHeader, wikiBaseUrl, type AtlassianEnv } from "../src/env.js";
 
 export interface ConfluencePage {
@@ -70,18 +71,28 @@ export async function getPage(pageIdOrUrl: string, options: ConfluenceClientOpti
     throw new Error(MISSING_CREDENTIALS);
   }
   const parsed = parseConfluencePageRef(pageIdOrUrl);
-  const base = wikiBaseUrl(env.confluenceBaseUrl || parsed.baseUrlFromUrl || "");
-  const url = `${base}/rest/api/content/${parsed.pageId}?expand=body.storage,space,version`;
+  const configured = assertConfiguredBaseUrl(env.confluenceBaseUrl || parsed.baseUrlFromUrl || "");
+  const host = configured.hostname.toLowerCase();
+  const base = wikiBaseUrl(configured.toString());
+  const url = assertAtlassianRequestUrl(
+    `${base}/rest/api/content/${encodeURIComponent(parsed.pageId)}?expand=body.storage,space,version`,
+    host,
+  );
   if (url.includes(env.confluenceToken)) {
     throw new Error("Refusing to put the Confluence API token in the request URL.");
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl(url, {
-    headers: {
-      Authorization: basicAuthHeader(env.confluenceEmail, env.confluenceToken),
-      Accept: "application/json",
+  const response = await fetchAtlassian(
+    url,
+    {
+      headers: {
+        Authorization: basicAuthHeader(env.confluenceEmail, env.confluenceToken),
+        Accept: "application/json",
+      },
     },
-  });
+    fetchImpl,
+    host,
+  );
   const body = await response.text();
   if (!response.ok) {
     throw new Error(`Confluence GET /rest/api/content/${parsed.pageId} failed: HTTP ${response.status} ${clip(body)}`);

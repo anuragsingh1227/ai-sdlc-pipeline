@@ -6,6 +6,7 @@ source:
   url: https://example.atlassian.net/wiki/spaces/OPS/pages/1042/Order-explain
   pageId: "1042"
   export: 00-source/page.md
+# Advisory. validate compares these strings and cannot see the host session.
 sessions:
   spec-writer: writer-session-01
   spec-critic: critic-session-01

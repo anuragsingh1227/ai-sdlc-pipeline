@@ -11,14 +11,20 @@ import { runNextStage, workerArgv } from "./runner.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("worker argv matches the documented CLIs", () => {
-  assert.deepEqual(workerArgv("grok", "/tmp/task.md", "prompt"), {
+test("worker argv reads a prompt file and never puts the prompt on argv", () => {
+  const prompt = "x".repeat(400);
+  assert.deepEqual(workerArgv("grok", "/tmp/task.md"), {
     command: "grok",
     args: ["-p", "--prompt-file", "/tmp/task.md"],
   });
-  assert.deepEqual(workerArgv("claude", "/tmp/task.md", "prompt").args[0], "-p");
-  assert.equal(workerArgv("codex", "/tmp/task.md", "prompt").command, "codex");
-  assert.equal(workerArgv("codex", "/tmp/task.md", "prompt").args[0], "exec");
+  const claude = workerArgv("claude", "/tmp/task.md");
+  assert.deepEqual(claude.args.slice(0, 3), ["-p", "--append-system-prompt-file", "/tmp/task.md"]);
+  assert.equal(claude.stdinFile, "/tmp/task.md");
+  assert.ok(!claude.args.includes(prompt));
+  assert.ok(claude.args.every((arg) => arg.length < 120 || arg.endsWith("task.md")));
+  const codex = workerArgv("codex", "/tmp/task.md");
+  assert.deepEqual(codex, { command: "codex", args: ["exec", "-"], stdinFile: "/tmp/task.md" });
+  assert.ok(!codex.args.includes(prompt));
 });
 
 test("dry-run on the sample stops at the human merge gate", async () => {
