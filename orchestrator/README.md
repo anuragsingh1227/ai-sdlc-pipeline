@@ -51,11 +51,13 @@ gates:
   merge: pending
 ```
 
-Allowed values are `passed`, `pending`, and `skipped`. `skipped` is valid only for `brief-questions`. Setting `spec-approved: passed` is the human's signature that tickets and code may start. Setting `merge: passed` means a human merged. Agents do not write `passed` for those two gates unless the human has explicitly told that session to record a decision the human already made.
+Allowed values are `passed`, `pending`, and `skipped`. `skipped` is valid only for `brief-questions`. Setting `spec-approved: passed` is the human's signature that tickets and code may start. Record `specApproval.sha256` of `02-spec/feature-spec.md` in the same edit. Setting `merge: passed` means a human merged. Agents do not write `passed` for those two gates unless the human has explicitly told that session to record a decision the human already made.
 
 ## Retry limits
 
-Each automated stage has `retryLimit`. A send-back consumes an attempt. Record counts under `attempts` in the manifest if you want them visible. When `attempts` is greater than `retryLimit`, `pipeline run` refuses to prepare that stage and names `escalateTo` (or a human, when the stage has no escalate target). The CLI does not mark the gate passed. A human has to take that gate.
+Each automated stage has `retryLimit`. A send-back consumes an attempt. Record counts under `attempts` in the manifest if you want them visible. When `attempts` is greater than `retryLimit`, `pipeline status` sets next to `escalateTo` when that id is a human gate, and `pipeline run` refuses to prepare the stage. Stages with no escalate target name a human. The CLI does not mark the gate passed. A human has to take that gate.
+
+`spec-approved: passed` also requires `specApproval.sha256` of `02-spec/feature-spec.md`. A hash mismatch, or a spec-critic verdict of `send-back` while the gate is still `passed`, blocks the gate again.
 
 ## Separation checks
 

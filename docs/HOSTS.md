@@ -24,18 +24,18 @@ When a worker is set and the binary is on `PATH`, the runner writes `<run>/.pipe
 
 | Worker | Command |
 | --- | --- |
-| Grok Build | `grok -p --prompt-file <task.md>` |
+| Grok Build | `grok --prompt-file <task.md> --sandbox workspace` with `Read` and `Edit` denied on `manifest.yaml` |
 | Claude Code | `claude -p --append-system-prompt-file <task.md>` with the same file on stdin |
 | Codex | `codex exec -` with `<task.md>` on stdin |
 
-The prompt file is the only copy of the task. Claude Code loads it with `--append-system-prompt-file` and also receives it on stdin. Codex reads it with `codex exec -`. The task text is not an argv entry. The working directory is the run directory, so a `.env` in the control-plane root is not the process cwd. The child environment drops `*_API_TOKEN`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`, and the same class of credential. The worker still receives its own `*_API_KEY` when that is how the coding CLI authenticates. A hard timeout kills the process; a signal or timeout is a non-zero exit. For the implement stage, the task tells the worker to edit the product repo named in the run. If the binary is missing, the runner exits with an error and does not pretend the stage ran. The runner does not pick a model and does not import an LLM SDK.
+The prompt file is the only copy of the task. Claude Code loads it with `--append-system-prompt-file` and also receives it on stdin. Codex reads it with `codex exec -`. Grok reads it with `--prompt-file` (not `-p`). The task text is not an argv entry. `--worker none` still writes `<run>/.pipeline/task.md` when it is not a dry-run. The working directory is the run directory, except `implement`, whose cwd is `manifest.productRepo` (resolved from the pipeline root) and whose task file includes that path. A `.env` in the control-plane root is not the process cwd. The child environment drops `*_API_TOKEN`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`, and the same class of credential. The worker still receives its own `*_API_KEY` when that is how the coding CLI authenticates. A hard timeout kills the process; a signal or timeout is a non-zero exit. If the worker changes a gate to `passed` or `skipped`, the runner restores the previous manifest gates and exits 1. An empty `sessions.<role>` is filled with a new UUID before a real worker starts. If the binary is missing, the runner exits with an error and does not pretend the stage ran. The runner does not pick a model and does not import an LLM SDK.
 
 Grok Build teammates can ignore `--worker` and follow `pipeline status` by hand. The CLI is still the validator: run `check`, `validate`, and `status` around that work.
 
 The output names a role, a skill, input paths, and output paths. Then:
 
 1. Start a **new** session. Do not resume the session that wrote the artifact under review.
-2. For a hand-driven session, set the working directory to the product repo for `implement`, and to the control-plane repo for every other stage. `pipeline run` starts the worker in the run directory instead, so it does not inherit the repo `.env` as its cwd. The implementer still needs the run directory for the AC files and the change summary.
+2. For a hand-driven session, set the working directory to the product repo for `implement`, and to the control-plane repo for every other stage. `pipeline run` uses the run directory for every stage except `implement`, which uses `manifest.productRepo` when that directory exists. The task file lists that absolute path. The implementer still needs the run directory for the AC files and the change summary.
 3. Give the worker `agents/<role>/SYSTEM.md`, the skill file, and the input files. Do not attach the other roles' system prompts.
 4. Tell the worker the output paths. Refuse edits outside those outputs (and, for the implementer, the product files named in the AC).
 5. When the session ends, run `pipeline validate --run <dir>` and `pipeline status` again.
@@ -52,7 +52,7 @@ Grok reads a root `AGENTS.md` and `.cursor/rules/` automatically. That is enough
 
 ```bash
 # From the control-plane repo, after `pipeline status` says spec-draft is next.
-grok -p --prompt-file agents/spec-writer/SYSTEM.md --rules "$(cat skills/write-spec/SKILL.md)"
+grok --prompt-file agents/spec-writer/SYSTEM.md --sandbox workspace
 ```
 
 Put the concrete input and output paths in the prompt file or in `--rules` for that invocation. Use a new process for the critic. Do not `--resume` the writer session to run `critique-spec`.

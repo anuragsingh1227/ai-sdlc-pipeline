@@ -40,7 +40,8 @@ export function parseConfluencePageRef(pageIdOrUrl: string): { pageId: string; b
 }
 
 export function storageToMarkdown(storage: string): string {
-  let text = storage.replace(/<ac:structured-macro[\s\S]*?<\/ac:structured-macro>/gi, "");
+  let text = unwrapStructuredMacros(storage);
+  text = text.replace(/<ac:structured-macro[\s\S]*?<\/ac:structured-macro>/gi, "");
   text = text.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag, inner: string) => `**${stripTags(inner)}**`);
   text = text.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag, inner: string) => `*${stripTags(inner)}*`);
   text = text.replace(/<a\s+[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, inner: string) => {
@@ -71,7 +72,8 @@ export async function getPage(pageIdOrUrl: string, options: ConfluenceClientOpti
     throw new Error(MISSING_CREDENTIALS);
   }
   const parsed = parseConfluencePageRef(pageIdOrUrl);
-  const configured = assertConfiguredBaseUrl(env.confluenceBaseUrl || parsed.baseUrlFromUrl || "");
+  // The page URL is only a page id. It must not replace CONFLUENCE_BASE_URL.
+  const configured = assertConfiguredBaseUrl(env.confluenceBaseUrl, { allowHost: env.atlassianAllowHost });
   const host = configured.hostname.toLowerCase();
   const base = wikiBaseUrl(configured.toString());
   const url = assertAtlassianRequestUrl(
@@ -140,6 +142,56 @@ function readStorage(document: Record<string, unknown>): string {
     throw new Error("Confluence response is missing body.storage.value. Fetch with expand=body.storage.");
   }
   return body.storage.value;
+}
+
+/**
+ * Code macros become fenced blocks. Panel, info, note, warning, and tip macros keep their rich text.
+ * Other macros are dropped by the caller.
+ */
+function unwrapStructuredMacros(storage: string): string {
+  return storage.replace(/<ac:structured-macro\b([^>]*)>([\s\S]*?)<\/ac:structured-macro>/gi, (_full, attrs: string, inner: string) => {
+    const name = macroName(attrs, inner);
+    if (name === "code") {
+      const language = macroParameter(inner, "language");
+      const body = cdataBody(inner);
+      return `\n\n\`\`\`${language}\n${body}\n\`\`\`\n\n`;
+    }
+    if (name === "panel" || name === "info" || name === "note" || name === "warning" || name === "tip") {
+      const title = macroParameter(inner, "title");
+      const rich = richTextBody(inner);
+      const heading = title ? `**${title}**\n\n` : "";
+      return `\n\n${heading}${rich}\n\n`;
+    }
+    return "";
+  });
+}
+
+function macroName(attrs: string, inner: string): string {
+  const named = /ac:name="([^"]+)"/i.exec(attrs);
+  if (named) {
+    return named[1].trim().toLowerCase();
+  }
+  return macroParameter(inner, "name").toLowerCase();
+}
+
+function macroParameter(inner: string, name: string): string {
+  const pattern = new RegExp(`<ac:parameter\\b[^>]*ac:name="${name}"[^>]*>([\\s\\S]*?)<\\/ac:parameter>`, "i");
+  const match = pattern.exec(inner);
+  return match ? stripTags(match[1]).trim() : "";
+}
+
+function cdataBody(inner: string): string {
+  const match = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(inner);
+  if (match) {
+    return match[1];
+  }
+  const plain = /<ac:plain-text-body\b[^>]*>([\s\S]*?)<\/ac:plain-text-body>/i.exec(inner);
+  return plain ? stripTags(plain[1]) : "";
+}
+
+function richTextBody(inner: string): string {
+  const match = /<ac:rich-text-body\b[^>]*>([\s\S]*?)<\/ac:rich-text-body>/i.exec(inner);
+  return match ? match[1] : inner;
 }
 
 function stripTags(value: string): string {

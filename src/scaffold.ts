@@ -31,7 +31,6 @@ const ENV_KEYS = [
   "JIRA_EMAIL",
   "JIRA_API_TOKEN",
   "JIRA_PROJECT_KEY",
-  "GIT_HOST",
 ];
 
 const SECRET_PATTERN = /sk-|xox[baprs]-|AKIA[0-9A-Z]{16}|ghp_|github_pat_|ATATT/;

@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { parse, stringify } from "yaml";
 import { retryBlockReason } from "./gates.js";
-import { DRAFT_LINE, assessRun, formatStatus, loadManifest, resolveArtifact } from "./run.js";
 import { resolveRepoPath } from "./paths.js";
+import {
+  CODE_CRITIC_PRODUCT,
+  DRAFT_LINE,
+  assessRun,
+  codeCriticProductEvidence,
+  formatStatus,
+  loadManifest,
+  resolveArtifact,
+} from "./run.js";
 import type { Pipeline, Stage } from "./types.js";
 import { leakedSecretNames, scrubWorkerEnv } from "./worker-env.js";
 
@@ -43,10 +53,20 @@ export interface RunRequest {
   spawnWorker?: (request: WorkerSpawnRequest) => SpawnResult;
 }
 
-export function workerArgv(worker: Exclude<WorkerName, "none">, taskFile: string): WorkerCommand {
+export function workerArgv(
+  worker: Exclude<WorkerName, "none">,
+  taskFile: string,
+  manifestPath?: string,
+): WorkerCommand {
   switch (worker) {
-    case "grok":
-      return { command: "grok", args: ["-p", "--prompt-file", taskFile] };
+    case "grok": {
+      // Headless Grok reads the task from --prompt-file. `-p` is a different flag and is not used.
+      const args = ["--prompt-file", taskFile, "--sandbox", "workspace"];
+      if (manifestPath) {
+        args.push("--deny", `Read(${manifestPath})`, "--deny", `Edit(${manifestPath})`);
+      }
+      return { command: "grok", args };
+    }
     case "claude":
       // The task file is an argument. The positional line is a fixed instruction, not the task body.
       // Stdin carries the same file for Claude Code builds that read the print-mode prompt from stdin.
@@ -114,6 +134,21 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
     return { code: 1, report: retryStop };
   }
 
+  const missingInput = missingRequiredInput(runDir, stage);
+  if (missingInput) {
+    return { code: 1, report: missingInput };
+  }
+  if (stage.id === "code-critic" && !codeCriticProductEvidence(runDir, loadManifest(runDir).manifest)) {
+    return { code: 1, report: CODE_CRITIC_PRODUCT };
+  }
+  if (stage.id === "implement") {
+    try {
+      resolveImplementCwd(pipeline, runDir);
+    } catch (error) {
+      return { code: 1, report: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   const lines = [
     `Next stage: ${stage.id} (${stage.label})`,
     `Role: ${stage.role}`,
@@ -166,13 +201,22 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
       report: `Refusing to write the task prompt because it contains secret env values: ${leaked.join(", ")}`,
     };
   }
+  if (!request.dryRun) {
+    fs.mkdirSync(path.dirname(taskFile), { recursive: true });
+    fs.writeFileSync(taskFile, prompt);
+    ensureSessionId(runRoot, stage.role);
+  }
   if (request.worker === "none") {
     lines.push("Worker none: templates prepared where missing. Draft files fail validate until a worker replaces them.");
     lines.push("Coding still happens in the product repo. This process does not call a model.");
+    if (!request.dryRun) {
+      lines.push(`Wrote task: ${display(taskFile)}`);
+    }
     return { code: 0, report: lines.join("\n") };
   }
 
-  const argv = workerArgv(request.worker, taskFile);
+  const manifestPath = path.join(runRoot, "manifest.yaml");
+  const argv = workerArgv(request.worker, taskFile, manifestPath);
   if (argv.args.some((arg) => arg === prompt)) {
     return { code: 1, report: "Refusing to pass the task prompt on the worker command line." };
   }
@@ -187,18 +231,29 @@ export function runNextStage(pipeline: Pipeline, runDir: string, request: RunReq
     lines.push(`Error: worker "${argv.command}" was not found on PATH. Install it, or rerun with --worker none.`);
     return { code: 1, report: lines.join("\n") };
   }
-  fs.mkdirSync(path.dirname(taskFile), { recursive: true });
-  fs.writeFileSync(taskFile, prompt);
   const timeoutMs = request.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
   const spawnWorker = request.spawnWorker ?? spawnWorkerProcess;
+  const manifestBefore = fs.existsSync(manifestPath) ? fs.readFileSync(manifestPath, "utf8") : null;
+  const gatesBefore = readGateMap(manifestBefore);
+  let cwd = runRoot;
+  if (stage.id === "implement") {
+    cwd = resolveImplementCwd(pipeline, runDir);
+  }
   const result = spawnWorker({
     command: argv.command,
     args: argv.args,
-    cwd: runRoot,
+    cwd,
     env: scrubWorkerEnv(process.env),
     timeoutMs,
     stdinFile: argv.stdinFile,
   });
+  const manifestAfter = fs.existsSync(manifestPath) ? fs.readFileSync(manifestPath, "utf8") : null;
+  const gatesAfter = readGateMap(manifestAfter);
+  if ((manifestBefore !== null && manifestAfter === null) || gatesPromoted(gatesBefore, gatesAfter)) {
+    restoreManifest(manifestPath, manifestBefore);
+    lines.push("Error: worker changed a gate to passed or skipped. Restored manifest.yaml gates and stopped.");
+    return { code: 1, report: lines.join("\n") };
+  }
   if (result.status !== 0) {
     const why = result.timedOut
       ? `timed out after ${timeoutMs}ms and was killed`
@@ -218,6 +273,7 @@ export function buildTaskPrompt(pipeline: Pipeline, runDir: string, stage: Stage
   const skill = fs.readFileSync(skillPath, "utf8").trim();
   const inputs = stage.inputs.map((artifact) => `- ${resolveArtifact(runDir, artifact.path)}`).join("\n");
   const outputs = stage.outputs.map((artifact) => `- ${resolveArtifact(runDir, artifact.path)}`).join("\n");
+  const product = productRepoSection(pipeline, runDir, stage);
   return [
     `# Stage ${stage.id}`,
     "",
@@ -229,6 +285,7 @@ export function buildTaskPrompt(pipeline: Pipeline, runDir: string, stage: Stage
     "## Skill",
     skill,
     "",
+    ...product,
     "## Inputs",
     inputs,
     "",
@@ -238,6 +295,118 @@ export function buildTaskPrompt(pipeline: Pipeline, runDir: string, stage: Stage
     "Remove the pipeline-draft marker from any file you finish.",
     "",
   ].join("\n");
+}
+
+function productRepoSection(pipeline: Pipeline, runDir: string, stage: Stage): string[] {
+  const { manifest } = loadManifest(runDir);
+  if (stage.id === "implement" && !manifest.productRepo) {
+    throw new Error("implement requires manifest.productRepo");
+  }
+  if (!manifest.productRepo) {
+    return [];
+  }
+  const resolved = path.resolve(pipeline.rootDir, manifest.productRepo);
+  return [
+    "## Product repo",
+    resolved,
+    manifest.branch ? `Branch: ${manifest.branch}` : "Branch: (not set)",
+    "",
+  ];
+}
+
+function resolveImplementCwd(pipeline: Pipeline, runDir: string): string {
+  const { manifest } = loadManifest(runDir);
+  if (!manifest.productRepo) {
+    throw new Error("implement requires manifest.productRepo");
+  }
+  const cwd = path.resolve(pipeline.rootDir, manifest.productRepo);
+  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+    throw new Error(`implement product repo is not a directory: ${cwd}`);
+  }
+  return cwd;
+}
+
+function missingRequiredInput(runDir: string, stage: Stage): string | null {
+  for (const artifact of stage.inputs) {
+    if (!artifact.required) {
+      continue;
+    }
+    let destination: string;
+    try {
+      destination = resolveArtifact(runDir, artifact.path);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    if (!fs.existsSync(destination) || !fs.statSync(destination).isFile() || fs.readFileSync(destination, "utf8").trim().length === 0) {
+      return `Missing required input ${artifact.path} for stage ${stage.id}`;
+    }
+  }
+  return null;
+}
+
+function ensureSessionId(runDir: string, role: string): void {
+  const manifestPath = path.join(runDir, "manifest.yaml");
+  let document: Record<string, unknown> = {};
+  if (fs.existsSync(manifestPath)) {
+    const parsed = parse(fs.readFileSync(manifestPath, "utf8"));
+    if (isRecord(parsed)) {
+      document = parsed;
+    }
+  }
+  const sessions = isRecord(document.sessions) ? { ...document.sessions } : {};
+  const current = sessions[role];
+  if (typeof current === "string" && current.trim().length > 0) {
+    return;
+  }
+  sessions[role] = randomUUID();
+  document.sessions = sessions;
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, stringify(document));
+}
+
+function readGateMap(raw: string | null): Record<string, string> {
+  if (raw === null) {
+    return {};
+  }
+  const parsed = parse(raw);
+  if (!isRecord(parsed) || !isRecord(parsed.gates)) {
+    return {};
+  }
+  const gates: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed.gates)) {
+    if (typeof value === "string") {
+      gates[key] = value;
+    }
+  }
+  return gates;
+}
+
+function gatesPromoted(before: Record<string, string>, after: Record<string, string>): boolean {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    if (before[key] === after[key]) {
+      continue;
+    }
+    if (after[key] === "passed" || after[key] === "skipped") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function restoreManifest(manifestPath: string, previous: string | null): void {
+  if (previous === null) {
+    if (fs.existsSync(manifestPath)) {
+      fs.rmSync(manifestPath);
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, previous);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function spawnWorkerProcess(request: WorkerSpawnRequest): SpawnResult {

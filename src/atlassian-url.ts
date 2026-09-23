@@ -11,31 +11,42 @@ const METADATA_HOSTS = new Set([
 ]);
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const MAX_REDIRECTS = 3;
+
+export interface AtlassianUrlOptions {
+  /**
+   * Exact extra host from `ATLASSIAN_ALLOW_HOST`.
+   * Link-local, loopback, metadata, and IP addresses stay refused even when this is set.
+   */
+  allowHost?: string;
+}
 
 /**
  * Validate a configured Confluence or Jira base URL.
- * https only. `*.atlassian.net` is allowlisted. Any other host is accepted only
- * as this exact configured host, and link-local, loopback, and metadata hosts are refused.
+ * https only, no userinfo. `*.atlassian.net` is allowlisted.
+ * Any other DNS host is accepted only when it matches `allowHost`.
  */
-export function assertConfiguredBaseUrl(raw: string): URL {
+export function assertConfiguredBaseUrl(raw: string, options: AtlassianUrlOptions = {}): URL {
   const url = parseHttps(raw);
   const host = normalizeHost(url.hostname);
   if (isDangerousHost(host)) {
-    throw new Error(`Refusing link-local, loopback, or metadata host: ${host}`);
+    throw new Error(`Refusing link-local, loopback, metadata, or private host: ${host}`);
   }
-  if (!isAtlassianCloudHost(host) && !isDnsName(host)) {
-    throw new Error(`Refusing host ${host}; expected *.atlassian.net or a configured DNS host`);
+  if (isAtlassianCloudHost(host)) {
+    return url;
   }
-  return url;
+  const allow = options.allowHost ? normalizeHost(options.allowHost) : undefined;
+  if (allow && host === allow) {
+    return url;
+  }
+  throw new Error(`Refusing host ${host}; expected *.atlassian.net or the host named by ATLASSIAN_ALLOW_HOST`);
 }
 
-/** A request or redirect target must stay on `*.atlassian.net` or the exact configured host. */
+/** A request target must stay on `*.atlassian.net` or the exact configured host. */
 export function assertAtlassianRequestUrl(raw: string, configuredHost: string): string {
   const url = parseHttps(raw);
   const host = normalizeHost(url.hostname);
   if (isDangerousHost(host)) {
-    throw new Error(`Refusing link-local, loopback, or metadata host: ${host}`);
+    throw new Error(`Refusing link-local, loopback, metadata, or private host: ${host}`);
   }
   const allowed = host === normalizeHost(configuredHost) || isAtlassianCloudHost(host);
   if (!allowed) {
@@ -55,8 +66,7 @@ export function isAtlassianCloudHost(host: string): boolean {
 }
 
 /**
- * Fetch without following redirects automatically.
- * Each hop must pass the same https and host checks as the original URL.
+ * Fetch with `redirect: "error"`. A 3xx response is a failure; the Location is not followed.
  */
 export async function fetchAtlassian(
   url: string,
@@ -64,23 +74,13 @@ export async function fetchAtlassian(
   fetchImpl: typeof fetch,
   configuredHost: string,
 ): Promise<Response> {
-  let current = assertAtlassianRequestUrl(url, configuredHost);
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-    const response = await fetchImpl(current, { ...init, redirect: "manual" });
-    if (!REDIRECT_STATUSES.has(response.status)) {
-      return response;
-    }
-    if (hop === MAX_REDIRECTS) {
-      throw new Error("Too many redirects talking to Atlassian");
-    }
-    const location = response.headers.get("location");
+  const current = assertAtlassianRequestUrl(url, configuredHost);
+  const response = await fetchImpl(current, { ...init, redirect: "error" });
+  if (REDIRECT_STATUSES.has(response.status)) {
     await discardBody(response);
-    if (!location) {
-      throw new Error("Atlassian redirect is missing a Location header");
-    }
-    current = assertAtlassianRequestUrl(new URL(location, current).toString(), configuredHost);
+    throw new Error("Refusing an Atlassian redirect (redirect mode is error)");
   }
-  throw new Error("Too many redirects talking to Atlassian");
+  return response;
 }
 
 function parseHttps(raw: string): URL {

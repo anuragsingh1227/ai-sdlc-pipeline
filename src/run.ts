@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
@@ -21,6 +22,43 @@ const GATE_STATES = new Set(["passed", "pending", "skipped"]);
 /** Appended when `pipeline run` copies a template. Validate refuses the stage until a worker replaces the draft. */
 export const DRAFT_LINE = "<!-- pipeline-draft: replace this scaffold before the stage can pass validate -->";
 
+export const CODE_CRITIC_PRODUCT =
+  "code-critic needs a non-empty 05-implement/product.diff or manifest productRepo and branch";
+
+/** True when the code critic has a product diff file or both productRepo and branch. */
+export function codeCriticProductEvidence(runDir: string, manifest: RunManifest): boolean {
+  const diffPath = path.join(path.resolve(runDir), "05-implement", "product.diff");
+  if (fs.existsSync(diffPath) && fs.statSync(diffPath).isFile()) {
+    if (fs.readFileSync(diffPath, "utf8").trim().length > 0) {
+      return true;
+    }
+  }
+  return Boolean(manifest.productRepo?.trim() && manifest.branch?.trim());
+}
+
+/**
+ * A passed spec-approved gate counts only while feature-spec.md still matches the recorded hash.
+ * Returns a problem string when the gate is passed and the hash is missing or different.
+ */
+export function specApprovalProblem(runDir: string, manifest: RunManifest): string | null {
+  if (manifest.gates["spec-approved"] !== "passed") {
+    return null;
+  }
+  const specPath = path.join(path.resolve(runDir), "02-spec", "feature-spec.md");
+  if (!fs.existsSync(specPath)) {
+    return "spec-approved is passed but 02-spec/feature-spec.md is missing";
+  }
+  const digest = createHash("sha256").update(fs.readFileSync(specPath)).digest("hex");
+  const recorded = manifest.specApproval?.sha256?.trim().toLowerCase();
+  if (!recorded) {
+    return "spec-approved is passed but manifest specApproval.sha256 is missing";
+  }
+  if (recorded !== digest) {
+    return "spec-approved is passed but feature-spec.md hash does not match specApproval.sha256";
+  }
+  return null;
+}
+
 export function loadManifest(runDir: string): { manifest: RunManifest; errors: string[] } {
   const errors: string[] = [];
   return { manifest: readManifest(path.resolve(runDir), errors), errors };
@@ -42,6 +80,10 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
   }
 
   const manifest = readManifest(absoluteRun, errors);
+  const specProblem = specApprovalProblem(absoluteRun, manifest);
+  if (specProblem) {
+    errors.push(specProblem);
+  }
   const briefMeta = readBriefMeta(pipeline, absoluteRun, errors);
   const ticketsChecked = { done: false };
 
@@ -84,11 +126,10 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
           checkArtifactContents(absoluteRun, item.artifact, errors, ticketsChecked);
         }
       }
-      const earlyAttempt = retryBlockReason(stage, manifest.attempts[stage.id]);
-      if (earlyAttempt) {
-        errors.push(earlyAttempt);
+      if (stage.id === "code-critic" && !codeCriticProductEvidence(absoluteRun, manifest)) {
+        errors.push(CODE_CRITIC_PRODUCT);
       }
-      next = stageAction(absoluteRun, stage);
+      next = attemptStopAction(pipeline, absoluteRun, stage, manifest, errors) ?? stageAction(absoluteRun, stage);
       break;
     }
 
@@ -109,9 +150,16 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
       break;
     }
 
-    const attemptError = retryBlockReason(stage, manifest.attempts[stage.id]);
-    if (attemptError) {
-      errors.push(attemptError);
+    if (stage.id === "code-critic" && !codeCriticProductEvidence(absoluteRun, manifest)) {
+      errors.push(CODE_CRITIC_PRODUCT);
+      next = stageAction(absoluteRun, stage, "product diff or product repo is missing");
+      break;
+    }
+
+    const attemptStop = attemptStopAction(pipeline, absoluteRun, stage, manifest, errors);
+    if (attemptStop) {
+      next = attemptStop;
+      break;
     }
     checkSeparation(pipeline, stage, manifest, errors);
 
@@ -126,6 +174,9 @@ export function assessRun(pipeline: Pipeline, runDir: string): RunStatus {
         break;
       }
       if (verdict === "send-back") {
+        if (stage.id === "spec-critic" && manifest.gates["spec-approved"] === "passed") {
+          errors.push("spec-approved is passed but the spec critic verdict is send-back; clear the gate before continuing");
+        }
         const target = pipeline.stages.find((item) => item.id === stage.onSendBack);
         if (!target) {
           errors.push(`${stage.id} send-back target is missing`);
@@ -272,8 +323,31 @@ function blocks(
   pipeline: Pipeline,
   verdict?: string,
 ): boolean {
+  if (gate.id === "spec-approved" && specApprovalProblem(runDir, manifest)) {
+    return true;
+  }
   const recorded = verdict ?? verdictFor(runDir, pipeline, gate);
   return gateBlocks(gate, manifest.gates[gate.id], briefMeta, recorded);
+}
+
+/** When attempts exceed retryLimit, move next to escalateTo if that id is a human gate. */
+function attemptStopAction(
+  pipeline: Pipeline,
+  runDir: string,
+  stage: Stage,
+  manifest: RunManifest,
+  errors: string[],
+): NextAction | null {
+  const reason = retryBlockReason(stage, manifest.attempts[stage.id]);
+  if (!reason) {
+    return null;
+  }
+  errors.push(reason);
+  const gate = stage.escalateTo ? pipeline.humanGates[stage.escalateTo] : undefined;
+  if (gate) {
+    return { kind: "gate", gate };
+  }
+  return stageAction(runDir, stage, reason);
 }
 
 function verdictFor(runDir: string, pipeline: Pipeline, gate: HumanGate): string | undefined {
@@ -448,10 +522,32 @@ function readManifest(runDir: string, errors: string[]): RunManifest {
   return {
     featureId: typeof document.featureId === "string" ? document.featureId : undefined,
     title: typeof document.title === "string" ? document.title : undefined,
+    productRepo: optionalText(document.productRepo),
+    branch: optionalText(document.branch),
+    specApproval: readSpecApproval(document.specApproval, errors),
     sessions,
     gates,
     attempts,
   };
+}
+
+function readSpecApproval(value: unknown, errors: string[]): { sha256: string } | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value) || typeof value.sha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(value.sha256.trim())) {
+    errors.push("manifest specApproval.sha256 must be a sha256 hex digest");
+    return undefined;
+  }
+  return { sha256: value.sha256.trim().toLowerCase() };
+}
+
+function optionalText(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function readBriefMeta(pipeline: Pipeline, runDir: string, errors: string[]): BriefMeta | null {
